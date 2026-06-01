@@ -169,7 +169,7 @@ def full_scan_pipeline(scan_time: datetime = None) -> dict:
     # ── Stage 1: Pre-fetch ──────────────────────────────────────────────────
     universe = load_universe()
     fno_stocks = load_fno_stocks()
-    batches = get_universe_batches(50)
+    batches = get_universe_batches(30)  # smaller batches = fewer failures per batch
     symbol_info = universe.set_index("symbol").to_dict("index")
     sector_map = load_sector_map()
     symbol_sector_map = dict(zip(universe["symbol"], universe["sector"]))
@@ -194,12 +194,20 @@ def full_scan_pipeline(scan_time: datetime = None) -> dict:
 
     market_regime = get_market_regime(index_data.get("^NSEI"))
     sector_status = get_all_sector_status(index_data)
-    logger.info(f"Stage 1 done: {time.time()-t0:.0f}s | regime={market_regime}")
+    logger.info(
+        f"Stage 1 done: {time.time()-t0:.0f}s | regime={market_regime} | "
+        f"data: W={len(weekly_data)} D={len(daily_data)} H={len(hourly_data)} symbols"
+    )
 
     # ── Stage 2: Filter ─────────────────────────────────────────────────────
     all_symbols = universe["symbol"].tolist()
     gate_results = apply_weekly_gate(all_symbols, weekly_data)
     passing_gate = gate_results["passing"]
+    logger.info(
+        f"Weekly gate: {len(gate_results['eligible'])} eligible, "
+        f"{len(gate_results['marginal'])} marginal, "
+        f"{len(gate_results['excluded'])} excluded → {len(passing_gate)} to filters"
+    )
 
     filter_report = apply_all_filters(
         passing_gate, daily_data, weekly_data,

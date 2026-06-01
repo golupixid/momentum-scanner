@@ -14,25 +14,35 @@ import pytz
 from src.universe import get_universe_batches, load_universe
 
 logger = logging.getLogger(__name__)
+# Suppress noisy yfinance errors — individual ticker failures are handled gracefully
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
 IST = pytz.timezone("Asia/Kolkata")
 
 WEEKLY_PERIOD = "1y"
 WEEKLY_INTERVAL = "1wk"
 DAILY_PERIOD = "6mo"
 DAILY_INTERVAL = "1d"
-HOURLY_DAYS = 60  # last 60 calendar days
+HOURLY_DAYS = 60
 HOURLY_INTERVAL = "1h"
 INDEX_PERIOD = "3mo"
 INDEX_INTERVAL = "1d"
 
 RETRY_ATTEMPTS = 3
-RETRY_DELAY = 2  # seconds
+RETRY_DELAY = 3  # seconds between retries
+BATCH_DELAY = 0.5  # seconds between batch calls to avoid rate limiting
 
 
 def _fetch_batch(tickers: list, period: str, interval: str, extra_args: dict = None) -> pd.DataFrame:
-    """Fetch one batch via yfinance download with retry."""
-    kwargs = dict(tickers=" ".join(tickers), period=period, interval=interval,
-                  auto_adjust=True, progress=False, threads=True)
+    """Fetch one batch via yfinance download with retry. threads=False avoids Yahoo rate-limiting."""
+    kwargs = dict(
+        tickers=" ".join(tickers),
+        period=period,
+        interval=interval,
+        auto_adjust=True,
+        progress=False,
+        threads=False,  # sequential per-ticker to avoid parallel rate limiting
+    )
     if extra_args:
         kwargs.update(extra_args)
 
@@ -75,27 +85,51 @@ def _fetch_hourly_batch(tickers: list) -> pd.DataFrame:
 def _split_multi_df(df: pd.DataFrame, tickers: list) -> dict:
     """
     Split a yfinance multi-ticker DataFrame into per-symbol DataFrames.
-    Handles both single-ticker (flat columns) and multi-ticker (MultiIndex columns).
+    Handles:
+    - MultiIndex (Price, Ticker) — yfinance default group_by='column'
+    - MultiIndex (Ticker, Price) — yfinance group_by='ticker'
+    - Flat columns — single-ticker fallback
     """
     result = {}
-    if df.empty:
+    if df is None or df.empty:
         return result
 
     if isinstance(df.columns, pd.MultiIndex):
+        lvl0 = df.columns.get_level_values(0).tolist()
+        lvl1 = df.columns.get_level_values(1).tolist()
+
+        # Determine which level holds tickers
+        # Ticker level contains .NS symbols; Price level contains OHLCV names
+        ohlcv = {"Open", "High", "Low", "Close", "Volume",
+                 "Adj Close", "Dividends", "Stock Splits"}
+        if any(v in ohlcv for v in lvl0):
+            ticker_level = 1  # (Price, Ticker)
+        else:
+            ticker_level = 0  # (Ticker, Price)
+
+        available = set(df.columns.get_level_values(ticker_level))
         for ticker in tickers:
             sym = ticker.replace(".NS", "")
+            if ticker not in available:
+                continue
             try:
-                sub = df.xs(ticker, axis=1, level=1) if ticker in df.columns.get_level_values(1) else pd.DataFrame()
-                if not sub.empty:
-                    sub = sub.dropna(how="all")
+                sub = df.xs(ticker, axis=1, level=ticker_level)
+                sub = sub.dropna(how="all")
+                if not sub.empty and len(sub) >= 5:
+                    # Standardise column names to Title Case
+                    sub.columns = [c.title() if isinstance(c, str) else c
+                                   for c in sub.columns]
                     result[sym] = sub
             except Exception:
                 pass
     else:
-        # Single ticker returned flat
-        if len(tickers) == 1:
-            sym = tickers[0].replace(".NS", "")
-            result[sym] = df.dropna(how="all")
+        # Flat columns — single ticker or all-failed batch
+        if len(df.columns) >= 4:  # at least OHLCV
+            sym = tickers[0].replace(".NS", "") if len(tickers) == 1 else None
+            if sym:
+                sub = df.dropna(how="all")
+                if not sub.empty and len(sub) >= 5:
+                    result[sym] = sub
 
     return result
 
@@ -104,9 +138,13 @@ def fetch_all_weekly(batches: list) -> dict:
     """Fetch 1wk data for all batches. Returns {symbol: df}."""
     all_data = {}
     for i, batch in enumerate(batches):
-        logger.info(f"Weekly batch {i+1}/{len(batches)} ({len(batch)} tickers)")
         df = _fetch_batch(batch, period=WEEKLY_PERIOD, interval=WEEKLY_INTERVAL)
-        all_data.update(_split_multi_df(df, batch))
+        got = _split_multi_df(df, batch)
+        all_data.update(got)
+        if i % 5 == 4:
+            logger.info(f"Weekly: {i+1}/{len(batches)} batches done, {len(all_data)} symbols with data")
+        time.sleep(BATCH_DELAY)
+    logger.info(f"Weekly fetch complete: {len(all_data)} symbols")
     return all_data
 
 
@@ -114,9 +152,13 @@ def fetch_all_daily(batches: list) -> dict:
     """Fetch 1d data for all batches. Returns {symbol: df}."""
     all_data = {}
     for i, batch in enumerate(batches):
-        logger.info(f"Daily batch {i+1}/{len(batches)} ({len(batch)} tickers)")
         df = _fetch_batch(batch, period=DAILY_PERIOD, interval=DAILY_INTERVAL)
-        all_data.update(_split_multi_df(df, batch))
+        got = _split_multi_df(df, batch)
+        all_data.update(got)
+        if i % 5 == 4:
+            logger.info(f"Daily: {i+1}/{len(batches)} batches done, {len(all_data)} symbols with data")
+        time.sleep(BATCH_DELAY)
+    logger.info(f"Daily fetch complete: {len(all_data)} symbols")
     return all_data
 
 
@@ -124,9 +166,13 @@ def fetch_all_hourly(batches: list) -> dict:
     """Fetch 1h data for all batches. Returns {symbol: df}."""
     all_data = {}
     for i, batch in enumerate(batches):
-        logger.info(f"Hourly batch {i+1}/{len(batches)} ({len(batch)} tickers)")
         df = _fetch_hourly_batch(batch)
-        all_data.update(_split_multi_df(df, batch))
+        got = _split_multi_df(df, batch)
+        all_data.update(got)
+        if i % 5 == 4:
+            logger.info(f"Hourly: {i+1}/{len(batches)} batches done, {len(all_data)} symbols with data")
+        time.sleep(BATCH_DELAY)
+    logger.info(f"Hourly fetch complete: {len(all_data)} symbols")
     return all_data
 
 
