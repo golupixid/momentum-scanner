@@ -1,0 +1,117 @@
+name: NSE Momentum Scanner
+
+on:
+  schedule:
+    # All times UTC (IST = UTC + 5:30)
+    - cron: '30 2 * * 1-5'   # 8:00 AM IST Mon-Fri  (pre-market)
+    - cron: '30 4 * * 1-5'   # 10:00 AM IST Mon-Fri (market open)
+    - cron: '0 6 * * 1-5'    # 11:30 AM IST Mon-Fri (mid morning)
+    - cron: '30 7 * * 1-5'   # 1:00 PM IST Mon-Fri  (midday)
+    - cron: '30 9 * * 1-5'   # 3:00 PM IST Mon-Fri  (pre-close)
+    - cron: '30 4 * * 0'     # 10:00 AM IST Sunday   (weekly report)
+  workflow_dispatch:          # Manual trigger always available
+    inputs:
+      scan_type:
+        description: 'Scan type'
+        required: false
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - premarket
+          - weekly_report
+          - dry_run
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    # Skip on Sunday for full scan (Sunday only runs weekly report)
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      !(github.event_name == 'schedule')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run scan
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "${{ github.event.inputs.scan_type }}" = "dry_run" ]; then
+            python main.py --dry-run
+          else
+            python main.py
+          fi
+
+  weekday_scan:
+    runs-on: ubuntu-latest
+    # Only runs on schedule triggers Mon-Fri
+    if: >
+      github.event_name == 'schedule' &&
+      (github.event.schedule == '30 2 * * 1-5' ||
+       github.event.schedule == '30 4 * * 1-5' ||
+       github.event.schedule == '0 6 * * 1-5' ||
+       github.event.schedule == '30 7 * * 1-5' ||
+       github.event.schedule == '30 9 * * 1-5')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run scan
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
+
+  weekly_report:
+    runs-on: ubuntu-latest
+    # Only runs on Sunday schedule
+    if: >
+      github.event_name == 'schedule' &&
+      github.event.schedule == '30 4 * * 0'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run weekly report
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python weekly_report.py

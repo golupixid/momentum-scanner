@@ -1,0 +1,19 @@
+sector,index_ticker,index_name
+Banking,^NSEBANK,Nifty Bank
+IT,^CNXIT,Nifty IT
+Auto,^CNXAUTO,Nifty Auto
+Pharma,^CNXPHARMA,Nifty Pharma
+FMCG,^CNXFMCG,Nifty FMCG
+Metals,^CNXMETAL,Nifty Metal
+Energy,^CNXENERGY,Nifty Energy
+Realty,^CNXREALTY,Nifty Realty
+Media,^CNXMEDIA,Nifty Media
+Finance,^CNXFIN,Nifty Financial Services
+Industrials,^CNXINFRA,Nifty Infra
+Consumer,^CNXCONSUMER,Nifty Consumer Durables
+Chemicals,^CNXCHEM,Nifty Chemicals
+Healthcare,^CNXHEALTH,Nifty Healthcare
+Telecom,^CNXTELECOM,Nifty Telecom
+Cement,^CNXINFRA,Nifty Infra
+Agro,^CNXFMCG,Nifty FMCG
+Textiles,^CNXINFRA,Nifty Infra

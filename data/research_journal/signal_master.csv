@@ -1,0 +1,1 @@
+signal_id,date,scan_time,symbol,sector,cap_type,signal_type,pattern,conviction_level,probability_band,entry_suggested,sl,t1,t2,rr_ratio,market_regime,sector_status,sector_rotating,news_flag,global_status,q1,q2,q3,oi_pattern,price_t1_hit,price_t2_hit,price_sl_hit,max_gain_pct,max_loss_pct,price_5d,price_10d,price_20d,outcome_label,failure_category,days_to_outcome
