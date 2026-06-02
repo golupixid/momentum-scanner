@@ -37,6 +37,21 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Warm up Yahoo Finance session
+        run: |
+          python -c "
+          import requests, time
+          s = requests.Session()
+          s.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+          try:
+              s.get('https://finance.yahoo.com', timeout=15)
+              time.sleep(1)
+              s.get('https://query1.finance.yahoo.com/v1/test/getcrumb', timeout=10)
+              print('Session warmed up')
+          except Exception as e:
+              print(f'Warm-up warning: {e}')
+          "
+
       - name: Run scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
