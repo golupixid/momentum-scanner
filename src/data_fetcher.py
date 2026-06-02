@@ -1,183 +1,92 @@
 """
-Batch-fetches Weekly, Daily, and Hourly OHLCV data for all universe stocks.
-Uses yfinance with a browser-like session (works from residential IPs).
-Designed for self-hosted GitHub Actions runner OR local execution.
+Data fetcher — public interface consumed by parallel_runner.py.
+Primary source: jugaad-data via nse_fetcher (works on GitHub-hosted runners).
+Hourly data: yfinance best-effort (empty dict if blocked; execution plans
+             fall back to daily-based estimates in that case).
 """
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+
 import pandas as pd
-import requests
-import yfinance as yf
 import pytz
 
-from src.universe import get_universe_batches
-
 logger = logging.getLogger(__name__)
-logging.getLogger("yfinance").setLevel(logging.CRITICAL)  # suppress per-ticker noise
-
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+logging.getLogger("urllib3").setLevel(logging.ERROR)
 IST = pytz.timezone("Asia/Kolkata")
 
-WEEKLY_PERIOD   = "1y"
-WEEKLY_INTERVAL = "1wk"
-DAILY_PERIOD    = "6mo"
-DAILY_INTERVAL  = "1d"
-HOURLY_INTERVAL = "1h"
-INDEX_PERIOD    = "3mo"
-INDEX_INTERVAL  = "1d"
 
-RETRY_ATTEMPTS = 2
-RETRY_DELAY    = 3
-BATCH_DELAY    = 0.5
+# ── Main fetchers (delegated to nse_fetcher) ──────────────────────────────────
 
-_session: requests.Session | None = None
+def fetch_all_data(symbols: list) -> tuple:
+    """
+    Fetch daily + weekly data for all symbols via jugaad-data.
+    Returns (daily_data, weekly_data) as {symbol: df} dicts.
+    """
+    from src.nse_fetcher import fetch_all_stocks, build_daily_weekly
+    raw = fetch_all_stocks(symbols)
+    return build_daily_weekly(raw)
 
 
-def _get_session() -> requests.Session:
-    """Browser-like requests session. Works from residential IPs."""
-    global _session
-    if _session is not None:
-        return _session
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": (
+# ── Hourly (best-effort yfinance) ─────────────────────────────────────────────
+
+def fetch_all_hourly(symbols: list) -> dict:
+    """
+    Try to fetch 60-day hourly data via yfinance.
+    Returns empty dict if GitHub runner IPs are blocked (normal on CI).
+    Execution plans will fall back to daily-based estimates.
+    """
+    try:
+        import yfinance as yf
+        import requests
+
+        session = requests.Session()
+        session.headers["User-Agent"] = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
-        ),
-        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection":      "keep-alive",
-    })
-    _session = s
-    return _session
+            "AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
+        )
 
+        end   = datetime.now(IST)
+        start = (end - timedelta(days=60)).strftime("%Y-%m-%d")
+        end_s = end.strftime("%Y-%m-%d")
 
-def _fetch_batch(tickers: list, period: str, interval: str,
-                 start: str = None, end: str = None) -> pd.DataFrame:
-    """Download one batch. Returns raw yfinance DataFrame."""
-    session = _get_session()
-    kwargs = dict(
-        tickers=" ".join(tickers),
-        interval=interval,
-        auto_adjust=True,
-        progress=False,
-        threads=True,
-        session=session,
-    )
-    if start and end:
-        kwargs.update(start=start, end=end)
-    else:
-        kwargs["period"] = period
+        results: dict = {}
+        batch_size = 30
+        batches = [symbols[i:i+batch_size] for i in range(0, len(symbols), batch_size)]
 
-    for attempt in range(RETRY_ATTEMPTS):
-        try:
-            df = yf.download(**kwargs)
-            return df
-        except Exception as e:
-            if attempt < RETRY_ATTEMPTS - 1:
-                time.sleep(RETRY_DELAY)
-            else:
-                logger.warning(f"Batch failed: {e}")
-    return pd.DataFrame()
-
-
-def _split_multi_df(df: pd.DataFrame, tickers: list) -> dict:
-    """
-    Split multi-ticker DataFrame into {symbol: df}.
-    Handles both (Price, Ticker) and (Ticker, Price) MultiIndex orderings.
-    """
-    result = {}
-    if df is None or df.empty:
-        return result
-
-    OHLCV = {"Open", "High", "Low", "Close", "Volume",
-              "Adj Close", "Dividends", "Stock Splits"}
-
-    if isinstance(df.columns, pd.MultiIndex):
-        lvl0 = set(df.columns.get_level_values(0))
-        ticker_level = 1 if (lvl0 & OHLCV) else 0
-        available = set(df.columns.get_level_values(ticker_level))
-
-        for ticker in tickers:
-            if ticker not in available:
-                continue
-            sym = ticker.replace(".NS", "")
+        for batch in batches:
+            tickers = [s + ".NS" for s in batch]
             try:
-                sub = df.xs(ticker, axis=1, level=ticker_level).copy()
-                sub = sub.dropna(how="all")
-                if len(sub) >= 5:
-                    sub.columns = [c.title() if isinstance(c, str) else c
-                                   for c in sub.columns]
-                    result[sym] = sub
+                df = yf.download(
+                    " ".join(tickers), start=start, end=end_s,
+                    interval="1h", auto_adjust=True,
+                    progress=False, threads=True, session=session,
+                )
+                if df.empty:
+                    continue
+                if isinstance(df.columns, pd.MultiIndex):
+                    for ticker in tickers:
+                        sym = ticker.replace(".NS", "")
+                        avail = df.columns.get_level_values(1)
+                        if ticker in avail:
+                            sub = df.xs(ticker, axis=1, level=1).dropna(how="all")
+                            if len(sub) >= 4:
+                                results[sym] = sub
             except Exception:
                 pass
-    else:
-        if len(tickers) == 1 and len(df) >= 5:
-            sym = tickers[0].replace(".NS", "")
-            sub = df.dropna(how="all").copy()
-            sub.columns = [c.title() if isinstance(c, str) else c for c in sub.columns]
-            result[sym] = sub
+            time.sleep(0.5)
 
-    return result
+        logger.info(f"Hourly fetch: {len(results)}/{len(symbols)} symbols "
+                    f"({'CI blocked — using daily fallback' if not results else 'OK'})")
+        return results
 
-
-def fetch_all_weekly(batches: list) -> dict:
-    all_data: dict = {}
-    for batch in batches:
-        df = _fetch_batch(batch, period=WEEKLY_PERIOD, interval=WEEKLY_INTERVAL)
-        all_data.update(_split_multi_df(df, batch))
-        time.sleep(BATCH_DELAY)
-    logger.info(f"Weekly fetch: {len(all_data)} symbols")
-    return all_data
+    except Exception as e:
+        logger.info(f"Hourly fetch skipped: {e}")
+        return {}
 
 
-def fetch_all_daily(batches: list) -> dict:
-    all_data: dict = {}
-    for batch in batches:
-        df = _fetch_batch(batch, period=DAILY_PERIOD, interval=DAILY_INTERVAL)
-        all_data.update(_split_multi_df(df, batch))
-        time.sleep(BATCH_DELAY)
-    logger.info(f"Daily fetch: {len(all_data)} symbols")
-    return all_data
-
-
-def fetch_all_hourly(batches: list) -> dict:
-    all_data: dict = {}
-    end_dt  = datetime.now(IST)
-    start_dt = end_dt - timedelta(days=60)
-    start    = start_dt.strftime("%Y-%m-%d")
-    end      = end_dt.strftime("%Y-%m-%d")
-
-    for batch in batches:
-        df = _fetch_batch(batch, period=None, interval=HOURLY_INTERVAL,
-                          start=start, end=end)
-        all_data.update(_split_multi_df(df, batch))
-        time.sleep(BATCH_DELAY)
-    logger.info(f"Hourly fetch: {len(all_data)} symbols")
-    return all_data
-
-
-def fetch_index_data(tickers: list) -> dict:
-    session = _get_session()
-    result  = {}
-    for ticker in tickers:
-        try:
-            df = yf.download(ticker, period=INDEX_PERIOD, interval=INDEX_INTERVAL,
-                             auto_adjust=True, progress=False, session=session)
-            if df is not None and not df.empty:
-                if isinstance(df.columns, pd.MultiIndex):
-                    avail = set(df.columns.get_level_values(1))
-                    if ticker in avail:
-                        df = df.xs(ticker, axis=1, level=1)
-                result[ticker] = df.dropna(how="all")
-        except Exception as e:
-            logger.debug(f"Index {ticker}: {e}")
-        time.sleep(0.2)
-    return result
-
+# ── Hourly slice helper (unchanged) ──────────────────────────────────────────
 
 def get_relevant_hourly(df_hourly: pd.DataFrame,
                         scan_time: datetime = None) -> pd.DataFrame:
@@ -206,12 +115,3 @@ def get_relevant_hourly(df_hourly: pd.DataFrame,
         return today_df
 
     return df[df.index.strftime("%Y-%m-%d").isin(dates[-5:])]
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    batches = get_universe_batches(30)
-    test    = [batches[0][:5]]
-    w = fetch_all_weekly(test)
-    for sym, df in w.items():
-        print(f"  {sym}: {len(df)} weekly bars")

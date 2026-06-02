@@ -150,11 +150,10 @@ def full_scan_pipeline(scan_time: datetime = None) -> dict:
     Full scan pipeline — stages 1-7.
     Returns final result dict for Telegram delivery.
     """
-    from src.universe import load_universe, load_fno_stocks, get_universe_batches
-    from src.data_fetcher import fetch_all_weekly, fetch_all_daily, fetch_all_hourly, fetch_index_data
+    from src.universe import load_universe, load_fno_stocks
     from src.global_markets import check_global_bleeding
-    from src.market_regime import get_market_regime
-    from src.sector_bleeding import get_all_sector_status, get_bleeding_sectors, load_sector_map
+    from src.nse_fetcher import fetch_all_stocks, build_daily_weekly, derive_market_regime, derive_sector_status
+    from src.data_fetcher import fetch_all_hourly
     from src.filters import apply_all_filters
     from src.weekly_gate import apply_weekly_gate
     from src.sector_distribution import apply_sector_cap, split_signals_by_type, get_watchlist_signals
@@ -169,38 +168,39 @@ def full_scan_pipeline(scan_time: datetime = None) -> dict:
     # ── Stage 1: Pre-fetch ──────────────────────────────────────────────────
     universe = load_universe()
     fno_stocks = load_fno_stocks()
-    batches = get_universe_batches(30)  # smaller batches = fewer failures per batch
     symbol_info = universe.set_index("symbol").to_dict("index")
-    sector_map = load_sector_map()
     symbol_sector_map = dict(zip(universe["symbol"], universe["sector"]))
+    all_symbols = universe["symbol"].tolist()
 
-    # Index tickers for sector bleeding
-    index_tickers = sector_map["index_ticker"].unique().tolist() + ["^NSEI"]
+    # Nifty 50 symbols needed for regime detection
+    nifty50_path = Path(__file__).parent.parent / "data" / "universe" / "nifty50.csv"
+    import pandas as _pd
+    nifty50_syms = _pd.read_csv(nifty50_path)["symbol"].tolist() if nifty50_path.exists() else all_symbols[:50]
 
+    # Run jugaad-data stock fetch + hourly + global + news in parallel
     with ThreadPoolExecutor(max_workers=4) as ex:
-        f_weekly = ex.submit(fetch_all_weekly, batches)
-        f_daily = ex.submit(fetch_all_daily, batches)
-        f_hourly = ex.submit(fetch_all_hourly, batches)
-        f_index = ex.submit(fetch_index_data, index_tickers)
-        f_global = ex.submit(check_global_bleeding)
+        f_stocks  = ex.submit(fetch_all_stocks, all_symbols)
+        f_hourly  = ex.submit(fetch_all_hourly, all_symbols)
+        f_global  = ex.submit(check_global_bleeding)
         f_headlines = ex.submit(fetch_market_headlines)
 
-        weekly_data = f_weekly.result()
-        daily_data = f_daily.result()
+        raw_data    = f_stocks.result()
         hourly_data = f_hourly.result()
-        index_data = f_index.result()
         global_status = f_global.result()
-        headlines = f_headlines.result()
+        headlines     = f_headlines.result()
 
-    market_regime = get_market_regime(index_data.get("^NSEI"))
-    sector_status = get_all_sector_status(index_data)
+    daily_data, weekly_data = build_daily_weekly(raw_data)
+
+    # Regime and sector status derived from downloaded stock data (no index API)
+    market_regime = derive_market_regime(daily_data, nifty50_syms)
+    sector_status = derive_sector_status(daily_data, symbol_sector_map)
+
     logger.info(
         f"Stage 1 done: {time.time()-t0:.0f}s | regime={market_regime} | "
         f"data: W={len(weekly_data)} D={len(daily_data)} H={len(hourly_data)} symbols"
     )
 
     # ── Stage 2: Filter ─────────────────────────────────────────────────────
-    all_symbols = universe["symbol"].tolist()
     gate_results = apply_weekly_gate(all_symbols, weekly_data)
     passing_gate = gate_results["passing"]
     logger.info(
