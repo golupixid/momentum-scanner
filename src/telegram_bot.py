@@ -20,21 +20,25 @@ PARSE_MODE = "Markdown"
 
 
 async def _send_async(token: str, chat_id: str, text: str, parse_mode: str = PARSE_MODE):
-    """Send a single Telegram message asynchronously."""
-    try:
-        from telegram import Bot
-        bot = Bot(token=token)
-        # Split if too long
-        chunks = [text[i:i + MAX_MSG_LEN] for i in range(0, len(text), MAX_MSG_LEN)]
-        for chunk in chunks:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=chunk,
-                parse_mode=parse_mode,
-                disable_web_page_preview=True,
-            )
-    except Exception as e:
-        logger.error(f"Telegram send failed: {e}")
+    """Send a single Telegram message. Falls back to plain text on parse error."""
+    from telegram import Bot
+    bot    = Bot(token=token)
+    chunks = [text[i:i + MAX_MSG_LEN] for i in range(0, len(text), MAX_MSG_LEN)]
+    for chunk in chunks:
+        for pm in (parse_mode, None):   # retry without formatting if parse fails
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    parse_mode=pm,
+                    disable_web_page_preview=True,
+                )
+                break
+            except Exception as e:
+                if pm is None:
+                    logger.error(f"Telegram send failed: {e}")
+                else:
+                    logger.debug(f"Parse mode {pm} failed, retrying plain: {e}")
 
 
 def send_message(text: str, token: str = None, chat_id: str = None):
