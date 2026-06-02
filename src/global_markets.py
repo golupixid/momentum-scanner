@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import requests
+import pandas as pd
 import yfinance as yf
 import pytz
 
@@ -41,9 +42,11 @@ def _fetch_gift_nifty_change() -> float:
     try:
         df = yf.download("^NSEI", period="2d", interval="1d",
                          auto_adjust=True, progress=False)
-        if df is None or len(df) < 2:
+        if df is None or df.empty or len(df) < 2:
             return 0.0
-        closes = df["Close"].dropna()
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.droplevel(1, axis=1)
+        closes = df["Close"].dropna().squeeze()
         if len(closes) < 2:
             return 0.0
         prev_close = float(closes.iloc[-2])
@@ -65,7 +68,10 @@ def _fetch_global_index_changes() -> dict:
                              auto_adjust=True, progress=False)
             if df is None or df.empty:
                 continue
-            closes = df["Close"].dropna()
+            # Flatten MultiIndex if present (single-ticker download)
+            if isinstance(df.columns, pd.MultiIndex):
+                df = df.xs(ticker, axis=1, level=1) if ticker in df.columns.get_level_values(1) else df.droplevel(1, axis=1)
+            closes = df["Close"].dropna().squeeze()
             if len(closes) < 2:
                 continue
             prev = float(closes.iloc[-2])

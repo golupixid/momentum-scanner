@@ -1,7 +1,7 @@
 """
 Batch-fetches Weekly, Daily, and Hourly OHLCV data for all universe stocks.
-Strategy: batches of 30 stocks per yfinance call (W+D+H).
-Uses a browser-like session to avoid Yahoo Finance IP blocking on CI runners.
+Uses yfinance with a browser-like session (works from residential IPs).
+Designed for self-hosted GitHub Actions runner OR local execution.
 """
 import logging
 import time
@@ -12,39 +12,33 @@ import requests
 import yfinance as yf
 import pytz
 
-from src.universe import get_universe_batches, load_universe
+from src.universe import get_universe_batches
 
 logger = logging.getLogger(__name__)
-logging.getLogger("yfinance").setLevel(logging.CRITICAL)  # suppress ticker-level noise
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)  # suppress per-ticker noise
 
 IST = pytz.timezone("Asia/Kolkata")
 
-WEEKLY_PERIOD  = "1y"
+WEEKLY_PERIOD   = "1y"
 WEEKLY_INTERVAL = "1wk"
-DAILY_PERIOD   = "6mo"
+DAILY_PERIOD    = "6mo"
 DAILY_INTERVAL  = "1d"
 HOURLY_INTERVAL = "1h"
-INDEX_PERIOD   = "3mo"
+INDEX_PERIOD    = "3mo"
 INDEX_INTERVAL  = "1d"
 
 RETRY_ATTEMPTS = 2
-RETRY_DELAY    = 4   # seconds between retries
-BATCH_DELAY    = 1.0 # seconds between batch calls
+RETRY_DELAY    = 3
+BATCH_DELAY    = 0.5
 
-# ── Browser-like session ──────────────────────────────────────────────────────
 _session: requests.Session | None = None
 
 
 def _get_session() -> requests.Session:
-    """
-    Return a cached requests.Session that looks like a real browser.
-    Visits finance.yahoo.com first to pick up cookies (crumb, etc.)
-    This prevents Yahoo Finance from blocking GitHub Actions runner IPs.
-    """
+    """Browser-like requests session. Works from residential IPs."""
     global _session
     if _session is not None:
         return _session
-
     s = requests.Session()
     s.headers.update({
         "User-Agent": (
@@ -56,33 +50,16 @@ def _get_session() -> requests.Session:
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection":      "keep-alive",
-        "Referer":         "https://finance.yahoo.com/",
     })
-
-    # Seed cookies
-    for url in [
-        "https://finance.yahoo.com",
-        "https://query1.finance.yahoo.com/v1/test/getcrumb",
-    ]:
-        try:
-            s.get(url, timeout=10, allow_redirects=True)
-            time.sleep(0.5)
-        except Exception:
-            pass
-
     _session = s
-    logger.info("Yahoo Finance session initialised")
     return _session
 
 
-# ── Core batch downloader ─────────────────────────────────────────────────────
-
 def _fetch_batch(tickers: list, period: str, interval: str,
                  start: str = None, end: str = None) -> pd.DataFrame:
-    """Download one batch with retry. Returns raw yfinance DataFrame."""
+    """Download one batch. Returns raw yfinance DataFrame."""
     session = _get_session()
-
-    base = dict(
+    kwargs = dict(
         tickers=" ".join(tickers),
         interval=interval,
         auto_adjust=True,
@@ -91,30 +68,26 @@ def _fetch_batch(tickers: list, period: str, interval: str,
         session=session,
     )
     if start and end:
-        base.update(start=start, end=end)
+        kwargs.update(start=start, end=end)
     else:
-        base["period"] = period
+        kwargs["period"] = period
 
     for attempt in range(RETRY_ATTEMPTS):
         try:
-            df = yf.download(**base)
+            df = yf.download(**kwargs)
             return df
         except Exception as e:
             if attempt < RETRY_ATTEMPTS - 1:
-                logger.debug(f"Batch retry {attempt+1}: {e}")
                 time.sleep(RETRY_DELAY)
             else:
-                logger.warning(f"Batch failed after {RETRY_ATTEMPTS} attempts: {e}")
+                logger.warning(f"Batch failed: {e}")
     return pd.DataFrame()
 
 
-# ── Column splitter ───────────────────────────────────────────────────────────
-
 def _split_multi_df(df: pd.DataFrame, tickers: list) -> dict:
     """
-    Split a multi-ticker yfinance DataFrame into {symbol: df} dict.
-    Handles (Price, Ticker) and (Ticker, Price) MultiIndex orderings,
-    plus single-ticker flat DataFrames.
+    Split multi-ticker DataFrame into {symbol: df}.
+    Handles both (Price, Ticker) and (Ticker, Price) MultiIndex orderings.
     """
     result = {}
     if df is None or df.empty:
@@ -124,11 +97,10 @@ def _split_multi_df(df: pd.DataFrame, tickers: list) -> dict:
               "Adj Close", "Dividends", "Stock Splits"}
 
     if isinstance(df.columns, pd.MultiIndex):
-        lvl0_vals = set(df.columns.get_level_values(0))
-        # If level 0 contains price fields → (Price, Ticker)
-        ticker_level = 1 if lvl0_vals & OHLCV else 0
-
+        lvl0 = set(df.columns.get_level_values(0))
+        ticker_level = 1 if (lvl0 & OHLCV) else 0
         available = set(df.columns.get_level_values(ticker_level))
+
         for ticker in tickers:
             if ticker not in available:
                 continue
@@ -143,7 +115,6 @@ def _split_multi_df(df: pd.DataFrame, tickers: list) -> dict:
             except Exception:
                 pass
     else:
-        # Flat: happens when only one ticker returned data
         if len(tickers) == 1 and len(df) >= 5:
             sym = tickers[0].replace(".NS", "")
             sub = df.dropna(how="all").copy()
@@ -153,46 +124,43 @@ def _split_multi_df(df: pd.DataFrame, tickers: list) -> dict:
     return result
 
 
-# ── Timeframe fetchers ────────────────────────────────────────────────────────
-
 def fetch_all_weekly(batches: list) -> dict:
     all_data: dict = {}
-    for i, batch in enumerate(batches):
+    for batch in batches:
         df = _fetch_batch(batch, period=WEEKLY_PERIOD, interval=WEEKLY_INTERVAL)
         all_data.update(_split_multi_df(df, batch))
         time.sleep(BATCH_DELAY)
-    logger.info(f"Weekly fetch complete: {len(all_data)} symbols with data")
+    logger.info(f"Weekly fetch: {len(all_data)} symbols")
     return all_data
 
 
 def fetch_all_daily(batches: list) -> dict:
     all_data: dict = {}
-    for i, batch in enumerate(batches):
+    for batch in batches:
         df = _fetch_batch(batch, period=DAILY_PERIOD, interval=DAILY_INTERVAL)
         all_data.update(_split_multi_df(df, batch))
         time.sleep(BATCH_DELAY)
-    logger.info(f"Daily fetch complete: {len(all_data)} symbols with data")
+    logger.info(f"Daily fetch: {len(all_data)} symbols")
     return all_data
 
 
 def fetch_all_hourly(batches: list) -> dict:
     all_data: dict = {}
-    end_dt   = datetime.now(IST)
+    end_dt  = datetime.now(IST)
     start_dt = end_dt - timedelta(days=60)
     start    = start_dt.strftime("%Y-%m-%d")
     end      = end_dt.strftime("%Y-%m-%d")
 
-    for i, batch in enumerate(batches):
+    for batch in batches:
         df = _fetch_batch(batch, period=None, interval=HOURLY_INTERVAL,
                           start=start, end=end)
         all_data.update(_split_multi_df(df, batch))
         time.sleep(BATCH_DELAY)
-    logger.info(f"Hourly fetch complete: {len(all_data)} symbols with data")
+    logger.info(f"Hourly fetch: {len(all_data)} symbols")
     return all_data
 
 
 def fetch_index_data(tickers: list) -> dict:
-    """Fetch index / sector data. Returns {ticker: df}."""
     session = _get_session()
     result  = {}
     for ticker in tickers:
@@ -201,23 +169,22 @@ def fetch_index_data(tickers: list) -> dict:
                              auto_adjust=True, progress=False, session=session)
             if df is not None and not df.empty:
                 if isinstance(df.columns, pd.MultiIndex):
-                    df = df.xs(ticker, axis=1, level=1) if ticker in df.columns.get_level_values(1) else df
+                    avail = set(df.columns.get_level_values(1))
+                    if ticker in avail:
+                        df = df.xs(ticker, axis=1, level=1)
                 result[ticker] = df.dropna(how="all")
         except Exception as e:
-            logger.debug(f"Index {ticker} failed: {e}")
-        time.sleep(0.3)
+            logger.debug(f"Index {ticker}: {e}")
+        time.sleep(0.2)
     return result
 
 
-# ── Hourly slice helper ───────────────────────────────────────────────────────
-
 def get_relevant_hourly(df_hourly: pd.DataFrame,
                         scan_time: datetime = None) -> pd.DataFrame:
-    """Return hourly slice per spec timing rules."""
     if df_hourly is None or df_hourly.empty:
         return df_hourly
 
-    now = scan_time or datetime.now(IST)
+    now       = scan_time or datetime.now(IST)
     today_str = now.strftime("%Y-%m-%d")
 
     idx = df_hourly.index
@@ -226,13 +193,11 @@ def get_relevant_hourly(df_hourly: pd.DataFrame,
     elif hasattr(idx, "tz") and idx.tz is not None:
         idx = idx.tz_convert(IST)
 
-    df = df_hourly.copy()
+    df       = df_hourly.copy()
     df.index = idx
+    dates    = sorted(set(idx.strftime("%Y-%m-%d")))
 
-    is_8am = (now.hour == 8 and now.minute < 30)
-    dates  = sorted(set(idx.strftime("%Y-%m-%d")))
-
-    if is_8am:
+    if now.hour == 8 and now.minute < 30:
         prev = dates[-2] if len(dates) >= 2 and dates[-1] == today_str else dates[-1]
         return df[df.index.strftime("%Y-%m-%d") == prev]
 
@@ -240,15 +205,13 @@ def get_relevant_hourly(df_hourly: pd.DataFrame,
     if len(today_df) >= 4:
         return today_df
 
-    last_5 = dates[-5:]
-    return df[df.index.strftime("%Y-%m-%d").isin(last_5)]
+    return df[df.index.strftime("%Y-%m-%d").isin(dates[-5:])]
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     batches = get_universe_batches(30)
-    test    = [batches[0][:3]]   # just 3 tickers
-    print("Testing weekly fetch with 3 tickers…")
+    test    = [batches[0][:5]]
     w = fetch_all_weekly(test)
     for sym, df in w.items():
-        print(f"  {sym}: {len(df)} bars  cols={list(df.columns)}")
+        print(f"  {sym}: {len(df)} weekly bars")

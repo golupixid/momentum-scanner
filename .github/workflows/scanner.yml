@@ -2,6 +2,7 @@ name: NSE Momentum Scanner
 
 on:
   schedule:
+    # All times UTC (IST = UTC + 5:30)
     - cron: '30 2 * * 1-5'   # 8:00 AM IST  Mon-Fri (pre-market)
     - cron: '30 4 * * 1-5'   # 10:00 AM IST Mon-Fri (market open)
     - cron: '0 6 * * 1-5'    # 11:30 AM IST Mon-Fri (mid-morning)
@@ -21,9 +22,17 @@ on:
           - weekly_report
           - dry_run
 
+# ── IMPORTANT ─────────────────────────────────────────────────────────────────
+# Yahoo Finance blocks GitHub-hosted runner IPs. This scanner MUST run on a
+# self-hosted runner (your own Windows machine). See README for setup steps.
+# ──────────────────────────────────────────────────────────────────────────────
+
 jobs:
   scanner:
-    runs-on: ubuntu-latest
+    # Use self-hosted runner (your Windows PC). To fall back to GitHub-hosted
+    # runners (data will fail), change to: runs-on: ubuntu-latest
+    runs-on: self-hosted
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,31 +41,16 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
 
       - name: Install dependencies
         run: pip install -r requirements.txt
-
-      - name: Warm up Yahoo Finance session
-        run: |
-          python -c "
-          import requests, time
-          s = requests.Session()
-          s.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-          try:
-              s.get('https://finance.yahoo.com', timeout=15)
-              time.sleep(1)
-              s.get('https://query1.finance.yahoo.com/v1/test/getcrumb', timeout=10)
-              print('Session warmed up')
-          except Exception as e:
-              print(f'Warm-up warning: {e}')
-          "
 
       - name: Run scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SCAN_TYPE: ${{ github.event.inputs.scan_type || 'auto' }}
+        shell: bash
         run: |
           if [ "$SCAN_TYPE" = "weekly_report" ]; then
             python weekly_report.py

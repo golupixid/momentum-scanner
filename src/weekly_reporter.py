@@ -33,7 +33,7 @@ def msg1_opportunity_summary(df: pd.DataFrame, week_start: datetime) -> str:
     if df.empty:
         return f"*📊 WEEK {week_str} - {week_end}: OPPORTUNITY SUMMARY*\n\nNo signals recorded this week."
 
-    recent = df[pd.to_datetime(df["date"], errors="coerce") >= pd.Timestamp(week_start)]
+    recent = df[pd.to_datetime(df["date"], errors="coerce") >= pd.Timestamp(week_start).tz_localize(None)]
     if recent.empty:
         return f"*📊 WEEK {week_str} - {week_end}*\n\nNo signals this week."
 

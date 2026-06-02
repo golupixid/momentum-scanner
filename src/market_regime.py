@@ -22,12 +22,18 @@ def _classify_regime(df: pd.DataFrame) -> str:
       - 200D SMA position: above/below
       - Recent momentum: last 5d direction
     """
-    if df is None or len(df) < 50:
+    if df is None or df.empty or len(df) < 50:
         return "Neutral"
 
-    close = df["Close"].dropna()
-    sma50 = close.rolling(50).mean().iloc[-1]
-    last = float(close.iloc[-1])
+    # Flatten MultiIndex if present
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.droplevel(1, axis=1) if len(df.columns.get_level_values(0).unique()) > 1 else df
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+    close = df["Close"].dropna().squeeze()
+    sma50 = float(close.rolling(50).mean().iloc[-1])
+    last  = float(close.iloc[-1])
 
     sma200 = close.rolling(200).mean().iloc[-1] if len(close) >= 200 else None
 
