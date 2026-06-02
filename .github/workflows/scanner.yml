@@ -29,9 +29,7 @@ on:
 
 jobs:
   scanner:
-    # Use self-hosted runner (your Windows PC). To fall back to GitHub-hosted
-    # runners (data will fail), change to: runs-on: ubuntu-latest
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
