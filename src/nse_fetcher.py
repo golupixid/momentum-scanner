@@ -21,9 +21,10 @@ logging.getLogger("jugaad_data").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3").setLevel(logging.ERROR)   # suppress connection pool noise
 
 # ── Config ────────────────────────────────────────────────────────────────────
-FETCH_MONTHS  = 13   # months of history to download (covers both weekly gate + daily signals)
-MAX_WORKERS   = 10
-WORKER_SLEEP  = 0.05  # small pause per worker to be polite to NSE
+FETCH_MONTHS   = 13   # months of history (covers both weekly gate + daily signals)
+MAX_WORKERS    = 20   # parallel workers
+WORKER_SLEEP   = 0.02
+PER_CALL_TIMEOUT = 12  # seconds — caps time on slow/non-existent symbols
 
 # Yahoo Finance / universe symbol → NSE official trading symbol (where they differ)
 SYMBOL_MAP: dict = {
@@ -63,15 +64,27 @@ def _to_ohlcv(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def _fetch_one(symbol: str, from_dt: date, to_dt: date) -> pd.DataFrame:
+    """Fetch with PER_CALL_TIMEOUT so non-existent/slow symbols fail fast."""
+    import concurrent.futures as cf
     from jugaad_data.nse import stock_df
+
     nse_sym = SYMBOL_MAP.get(symbol, symbol)
-    try:
-        time.sleep(WORKER_SLEEP)
-        raw = stock_df(symbol=nse_sym, from_date=from_dt, to_date=to_dt, series="EQ")
-        return _to_ohlcv(raw)
-    except Exception as e:
-        logger.debug(f"{symbol} ({nse_sym}): {e}")
-        return pd.DataFrame()
+    time.sleep(WORKER_SLEEP)
+
+    def _call():
+        return stock_df(symbol=nse_sym, from_date=from_dt, to_date=to_dt, series="EQ")
+
+    with cf.ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(_call)
+        try:
+            raw = fut.result(timeout=PER_CALL_TIMEOUT)
+            return _to_ohlcv(raw)
+        except cf.TimeoutError:
+            logger.debug(f"{symbol}: timeout after {PER_CALL_TIMEOUT}s")
+            return pd.DataFrame()
+        except Exception as e:
+            logger.debug(f"{symbol} ({nse_sym}): {e}")
+            return pd.DataFrame()
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -96,7 +109,7 @@ def fetch_all_stocks(symbols: list) -> dict:
             if not df.empty:
                 results[sym] = df
             done += 1
-            if done % 100 == 0:
+            if done % 50 == 0:
                 logger.info(f"  fetched {done}/{len(symbols)}, {len(results)} with data")
 
     logger.info(f"fetch_all_stocks: {len(results)}/{len(symbols)} symbols returned data")
