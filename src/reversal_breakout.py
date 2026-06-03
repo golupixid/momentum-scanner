@@ -107,11 +107,11 @@ def check_retest_recovery_b(df: pd.DataFrame) -> dict:
 
 
 def check_short_covering_c1(df: pd.DataFrame, oi_data: dict = None,
-                              pcr: float = None) -> dict:
+                              pcr: float = None, symbol: str = "") -> dict:
     """
     Setup C1: Short Covering (FNO).
-    OI falling >5% + price rising + PCR > 1.0 + Close > 20 EMA.
-    oi_data: {'prev_oi': float, 'curr_oi': float}
+    OI falling >2% + price rising + PCR > 1.0 + Close within 2% of 20 EMA.
+    Relaxed: close > ema20 × 0.98 (short covering can happen slightly below 20 EMA).
     """
     result = {"triggered": False, "setup": "C1_SHORT_COVER", "close": 0.0,
               "oi_change_pct": 0.0, "pcr": pcr or 0.0}
@@ -129,7 +129,7 @@ def check_short_covering_c1(df: pd.DataFrame, oi_data: dict = None,
     # Price rising (last 2 bars)
     price_rising = len(df) >= 2 and close > float(df.iloc[-2]["Close"])
 
-    # Fix 5: OI falling > 2% (relaxed from 5% to catch volume-proxy signals too)
+    # OI falling > 2% (works with volume proxy signals too)
     oi_falling = False
     oi_change = 0.0
     if oi_data and oi_data.get("oi_change_pct") is not None:
@@ -143,13 +143,21 @@ def check_short_covering_c1(df: pd.DataFrame, oi_data: dict = None,
 
     result["oi_change_pct"] = oi_change
 
-    # PCR > 1.0 (optional when using volume proxy — allow None to pass)
+    # PCR > 1.0 (allow None to pass when using volume proxy)
     pcr_ok = (pcr is None) or (pcr > 1.0)
 
-    above_ema20 = close > ema20
+    # Relaxed: within 2% below 20 EMA is acceptable for short-covering stocks
+    above_ema20 = close > ema20 * 0.98
 
-    if oi_falling and price_rising and pcr_ok and above_ema20:
+    triggered = oi_falling and price_rising and pcr_ok and above_ema20
+    if triggered:
         result["triggered"] = True
+    elif symbol:
+        logger.debug(
+            f"C1 {symbol}: oi_fall={oi_falling}({oi_change:.1f}%) "
+            f"price_rising={price_rising} pcr_ok={pcr_ok} "
+            f"ema_ok={above_ema20}(close={close:.2f} ema={ema20:.2f})"
+        )
 
     return result
 
@@ -223,7 +231,7 @@ def get_reversal_signals(symbol: str, df_daily: pd.DataFrame,
 
     # FNO-only signals
     if is_fno:
-        rc1 = check_short_covering_c1(df_daily, oi_data, pcr)
+        rc1 = check_short_covering_c1(df_daily, oi_data, pcr, symbol=symbol)
         if rc1["triggered"]:
             signals.append({
                 "symbol": symbol, "setup": "C1", "pattern": "SHORT_COVER",

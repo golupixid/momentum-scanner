@@ -22,11 +22,6 @@ on:
           - weekly_report
           - dry_run
 
-# ── IMPORTANT ─────────────────────────────────────────────────────────────────
-# Yahoo Finance blocks GitHub-hosted runner IPs. This scanner MUST run on a
-# self-hosted runner (your own Windows machine). See README for setup steps.
-# ──────────────────────────────────────────────────────────────────────────────
-
 jobs:
   scanner:
     runs-on: ubuntu-latest
@@ -48,28 +43,25 @@ jobs:
         run: |
           echo "=== Python & packages ==="
           python --version
-          pip show curl_cffi yfinance pandas requests python-telegram-bot 2>/dev/null | grep -E "^(Name|Version):"
+          pip show curl_cffi yfinance pandas python-telegram-bot 2>/dev/null | grep -E "^(Name|Version):"
           echo "=== Network reachability ==="
-          curl -s -o /dev/null -w "Yahoo Finance query1: %{http_code}\n" \
+          curl -s -o /dev/null -w "Yahoo query1: %{http_code}\n" \
             "https://query1.finance.yahoo.com/v8/finance/chart/RELIANCE.NS?range=5d&interval=1d" || true
-          curl -s -o /dev/null -w "Yahoo Finance query2: %{http_code}\n" \
+          curl -s -o /dev/null -w "Yahoo query2: %{http_code}\n" \
             "https://query2.finance.yahoo.com/v8/finance/chart/RELIANCE.NS?range=5d&interval=1d" || true
-          curl -s -o /dev/null -w "NSE India: %{http_code}\n" \
-            "https://www.nseindia.com" || true
+          curl -s -o /dev/null -w "NSE India: %{http_code}\n" "https://www.nseindia.com" || true
           echo "=== curl_cffi smoke test ==="
           python -c "
           from curl_cffi import requests as cr
           s = cr.Session(impersonate='chrome120')
           r = s.get('https://query1.finance.yahoo.com/v8/finance/chart/RELIANCE.NS?range=5d&interval=1d', timeout=15)
-          print(f'curl_cffi Yahoo test: HTTP {r.status_code}')
-          import json
+          print(f'curl_cffi status: {r.status_code}')
           try:
-              d = r.json()
-              rows = len(d.get('chart',{}).get('result',[{}])[0].get('timestamp',[]))
-              print(f'curl_cffi Yahoo data rows: {rows}')
+              rows = len(r.json().get('chart',{}).get('result',[{}])[0].get('timestamp',[]))
+              print(f'curl_cffi data rows: {rows}')
           except Exception as e:
-              print(f'Parse error: {e}')
-          " || echo "curl_cffi smoke test failed (non-fatal)"
+              print(f'parse error: {e}')
+          " || echo "curl_cffi test failed (non-fatal)"
 
       - name: Run scanner
         env:
@@ -85,7 +77,7 @@ jobs:
           elif [ "$SCAN_TYPE" = "dry_run" ]; then
             python main.py --dry-run
           elif [ "$SCAN_TYPE" = "premarket" ]; then
-            python main.py --time 8AM
+            python main.py --time 8AM --real-run
           else
-            python main.py
+            python main.py --real-run
           fi
