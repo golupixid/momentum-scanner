@@ -152,12 +152,14 @@ def full_scan_pipeline(scan_time: datetime = None) -> dict:
     """
     from src.universe import load_universe, load_fno_stocks
     from src.global_markets import check_global_bleeding
-    from src.data_fetcher import fetch_all_weekly, fetch_all_daily, fetch_all_hourly, fetch_index_data
+    from src.data_fetcher import fetch_all_weekly, fetch_all_daily, fetch_all_hourly
     from src.nse_fetcher import derive_market_regime, derive_sector_status
     from src.filters import apply_all_filters
     from src.weekly_gate import apply_weekly_gate
-    from src.sector_distribution import apply_sector_cap, split_signals_by_type, get_watchlist_signals
-    from src.signal_registry import dedup_signals, register_signal
+    from src.sector_distribution import (apply_sector_cap, split_signals_by_type,
+                                          get_watchlist_signals, dedup_signals_within_type)
+    from src.signal_registry import dedup_signals, register_signal, cleanup_and_get_blocked
+    from src.fno_signals import build_oi_cache_for_fno
     from src.news_scanner import fetch_market_headlines, fetch_news_for_signals
     from src.research_journal import record_signal
 
@@ -176,12 +178,14 @@ def full_scan_pipeline(scan_time: datetime = None) -> dict:
     import pandas as _pd
     nifty50_syms = _pd.read_csv(nifty50_path)["symbol"].tolist() if nifty50_path.exists() else all_symbols[:50]
 
+    logger.info(f"Universe: {len(all_symbols)} stocks | FNO: {len(fno_stocks)} stocks")
+
     # Fetch W + D + H in parallel (each is sequential batches internally)
     with ThreadPoolExecutor(max_workers=4) as ex:
-        f_weekly  = ex.submit(fetch_all_weekly, all_symbols)
-        f_daily   = ex.submit(fetch_all_daily,  all_symbols)
-        f_hourly  = ex.submit(fetch_all_hourly, all_symbols)
-        f_global  = ex.submit(check_global_bleeding)
+        f_weekly    = ex.submit(fetch_all_weekly, all_symbols)
+        f_daily     = ex.submit(fetch_all_daily,  all_symbols)
+        f_hourly    = ex.submit(fetch_all_hourly, all_symbols)
+        f_global    = ex.submit(check_global_bleeding)
         f_headlines = ex.submit(fetch_market_headlines)
 
         weekly_data   = f_weekly.result()
@@ -190,7 +194,7 @@ def full_scan_pipeline(scan_time: datetime = None) -> dict:
         global_status = f_global.result()
         headlines     = f_headlines.result()
 
-    # Regime and sector from downloaded stock data (no separate index API call)
+    # Regime and sector from downloaded stock data
     market_regime = derive_market_regime(daily_data, nifty50_syms)
     sector_status = derive_sector_status(daily_data, symbol_sector_map)
 
@@ -198,6 +202,15 @@ def full_scan_pipeline(scan_time: datetime = None) -> dict:
         f"Stage 1 done: {time.time()-t0:.0f}s | regime={market_regime} | "
         f"data: W={len(weekly_data)} D={len(daily_data)} H={len(hourly_data)} symbols"
     )
+
+    # ── Fix 4: Active registry cleanup — remove T1/SL/expired, get blocked symbols ──
+    blocked_symbols = cleanup_and_get_blocked(daily_data)
+    logger.info(f"Active registry: {len(blocked_symbols)} symbols blocked from new signals")
+
+    # ── Fix 5: Build OI cache for FNO stocks (NSE API + volume proxy fallback) ──
+    fno_in_universe = fno_stocks & set(all_symbols)
+    oi_cache = build_oi_cache_for_fno(fno_in_universe, daily_data)
+    logger.info(f"FNO: {len(fno_in_universe)} FNO stocks in universe | OI cache: {len(oi_cache)}")
 
     # ── Stage 2: Filter ─────────────────────────────────────────────────────
     gate_results = apply_weekly_gate(all_symbols, weekly_data)
@@ -212,17 +225,26 @@ def full_scan_pipeline(scan_time: datetime = None) -> dict:
         passing_gate, daily_data, weekly_data,
         symbol_sector_map, sector_status, global_status,
     )
-    passing_symbols = filter_report["passing"]
-    logger.info(f"Stage 2 done: {len(passing_symbols)} pass all filters")
+    # Fix 4: Remove blocked symbols (live trades) from processing
+    passing_symbols = [s for s in filter_report["passing"] if s not in blocked_symbols]
+    blocked_from_filter = len(filter_report["passing"]) - len(passing_symbols)
+    logger.info(
+        f"Stage 2 done: {len(passing_symbols)} pass all filters "
+        f"({blocked_from_filter} blocked by active registry)"
+    )
 
     # ── Stage 3: Process ────────────────────────────────────────────────────
     all_signals = run_parallel_processing(
         passing_symbols, daily_data, weekly_data, hourly_data,
         symbol_info, fno_stocks, gate_results,
         market_regime, sector_status,
+        oi_cache=oi_cache,  # Fix 5: pass OI cache
     )
 
-    # Dedup
+    # Fix 3: Dedup within each signal_type (same symbol+type → keep best conviction)
+    all_signals = dedup_signals_within_type(all_signals)
+
+    # Dedup against already-sent today
     all_signals = dedup_signals(all_signals)
     logger.info(f"Stage 3 done: {len(all_signals)} unique signals")
 
@@ -231,7 +253,7 @@ def full_scan_pipeline(scan_time: datetime = None) -> dict:
 
     # ── Stage 5: Rank + sector cap ──────────────────────────────────────────
     signal_groups = split_signals_by_type(all_signals)
-    rotating_sectors = []  # TODO: implement rotation detection
+    rotating_sectors = []
 
     final = {}
     overflow_all = []
@@ -240,7 +262,20 @@ def full_scan_pipeline(scan_time: datetime = None) -> dict:
         final[group_name] = result["top"]
         overflow_all.extend(result["overflow"])
 
-    watchlist_sigs = get_watchlist_signals(all_signals)
+    # Fix 6: Watchlist dedup — exclude main signal symbols, dedup within watchlist
+    main_signal_symbols = set(
+        s["symbol"] for group in final.values() for s in group
+    )
+    watchlist_sigs = get_watchlist_signals(
+        all_signals, excluded_symbols=main_signal_symbols
+    )
+
+    logger.info(
+        f"Stage 5 done: MOM={len(final.get('momentum', []))} "
+        f"REV={len(final.get('reversal', []))} "
+        f"FNO={len(final.get('fno', []))} "
+        f"WATCHLIST={len(watchlist_sigs)} overflow={len(overflow_all)}"
+    )
 
     # ── Stage 6: News for final 15 ──────────────────────────────────────────
     final_symbols = list(set(

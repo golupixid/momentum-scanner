@@ -129,19 +129,22 @@ def check_short_covering_c1(df: pd.DataFrame, oi_data: dict = None,
     # Price rising (last 2 bars)
     price_rising = len(df) >= 2 and close > float(df.iloc[-2]["Close"])
 
-    # OI falling > 5%
+    # Fix 5: OI falling > 2% (relaxed from 5% to catch volume-proxy signals too)
     oi_falling = False
     oi_change = 0.0
-    if oi_data and oi_data.get("prev_oi", 0) > 0:
-        prev_oi = oi_data["prev_oi"]
-        curr_oi = oi_data["curr_oi"]
+    if oi_data and oi_data.get("oi_change_pct") is not None:
+        oi_change = float(oi_data["oi_change_pct"])
+        oi_falling = oi_change < -2.0
+    elif oi_data and oi_data.get("prev_oi", 0) > 0:
+        prev_oi = float(oi_data["prev_oi"])
+        curr_oi = float(oi_data["curr_oi"])
         oi_change = (curr_oi - prev_oi) / prev_oi * 100
-        oi_falling = oi_change < -5.0
+        oi_falling = oi_change < -2.0
 
     result["oi_change_pct"] = oi_change
 
-    # PCR > 1.0
-    pcr_ok = (pcr is not None and pcr > 1.0)
+    # PCR > 1.0 (optional when using volume proxy — allow None to pass)
+    pcr_ok = (pcr is None) or (pcr > 1.0)
 
     above_ema20 = close > ema20
 

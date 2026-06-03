@@ -12,25 +12,53 @@ logger = logging.getLogger(__name__)
 MAX_PER_SECTOR = 2
 TOP_N = 5  # top signals to output per signal type
 
+_CONVICTION_ORDER = {"HIGH": 4, "MODERATE": 3, "LOW": 2, "WATCHLIST": 1}
+
+
+def dedup_signals_within_type(signals: list) -> list:
+    """
+    Fix 3: Within each signal_type category, keep only the highest conviction
+    signal per symbol. If two signals share symbol AND signal_type, only the
+    best one survives (higher conviction wins; tie-break: higher vol_ratio).
+    """
+    seen = {}  # (symbol, signal_type) → best signal so far
+    for sig in signals:
+        key = (sig.get("symbol", ""), sig.get("signal_type", ""))
+        existing = seen.get(key)
+        if existing is None:
+            seen[key] = sig
+        else:
+            curr_level = _CONVICTION_ORDER.get(sig.get("conviction", "WATCHLIST"), 0)
+            best_level = _CONVICTION_ORDER.get(existing.get("conviction", "WATCHLIST"), 0)
+            if curr_level > best_level:
+                seen[key] = sig
+            elif curr_level == best_level:
+                # Tie-break: prefer higher vol_ratio
+                if sig.get("vol_ratio", 0) > existing.get("vol_ratio", 0):
+                    seen[key] = sig
+    result = list(seen.values())
+    removed = len(signals) - len(result)
+    if removed:
+        logger.info(f"Dedup within type: removed {removed} duplicate symbol+type entries")
+    return result
+
 
 def apply_sector_cap(signals: list, symbol_sector_map: dict,
                       rotating_sectors: set = None) -> dict:
     """
     Cap signals by sector. Returns {'top': [...], 'overflow': [...]}.
     - top: up to MAX_PER_SECTOR per sector, then top TOP_N overall
-    - overflow: signals beyond the sector cap (labelled as overflow)
+    - overflow: signals beyond the sector cap
     Rotating sectors ranked first within same conviction level.
     """
     rotating_sectors = rotating_sectors or set()
 
-    # Sort: rotating sectors first, then by conviction level
     def sort_key(s):
         sector = symbol_sector_map.get(s.get("symbol", ""), "Unknown")
         rotating_boost = 0 if sector in rotating_sectors else 1
-        conviction_order = {"HIGH": 0, "MODERATE": 1, "LOW": 2, "WATCHLIST": 3}
-        conv = conviction_order.get(s.get("conviction", "WATCHLIST"), 3)
-        rr = -s.get("rr", 0.0)  # negative for descending sort
-        return (rotating_boost, conv, rr)
+        conv = _CONVICTION_ORDER.get(s.get("conviction", "WATCHLIST"), 0)
+        rr = s.get("rr", 0.0)
+        return (rotating_boost, -conv, -rr)
 
     sorted_signals = sorted(signals, key=sort_key)
 
@@ -48,7 +76,6 @@ def apply_sector_cap(signals: list, symbol_sector_map: dict,
             sig["overflow"] = True
             overflow.append(sig)
 
-    # Final top-N
     top_5 = top[:TOP_N]
     remaining = top[TOP_N:] + overflow
 
@@ -74,15 +101,42 @@ def split_signals_by_type(all_signals: list) -> dict:
     return {"momentum": momentum, "reversal": reversal, "fno": fno}
 
 
-def get_watchlist_signals(signals: list, min_conviction: str = "LOW") -> list:
-    """Return signals with conviction LOW or WATCHLIST for the footer section."""
-    order = {"HIGH": 4, "MODERATE": 3, "LOW": 2, "WATCHLIST": 1}
-    threshold = order.get(min_conviction, 2)
-    return [s for s in signals if order.get(s.get("conviction", "WATCHLIST"), 0) <= threshold]
+def get_watchlist_signals(signals: list, min_conviction: str = "LOW",
+                           excluded_symbols: set = None) -> list:
+    """
+    Fix 6: Return watchlist signals (LOW/WATCHLIST conviction) with:
+    1. Symbols already in main signals (msg 2/3/4) excluded
+    2. Deduplication within watchlist — each symbol appears at most once
+       with the highest conviction level
+    """
+    excluded_symbols = excluded_symbols or set()
+    threshold = _CONVICTION_ORDER.get(min_conviction, 2)
+
+    # Filter: only LOW/WATCHLIST, not already in main signals
+    candidates = [
+        s for s in signals
+        if _CONVICTION_ORDER.get(s.get("conviction", "WATCHLIST"), 0) <= threshold
+        and s.get("symbol", "") not in excluded_symbols
+    ]
+
+    # Dedup by symbol: keep highest conviction, then best vol_ratio on tie
+    seen = {}
+    for s in sorted(candidates,
+                    key=lambda x: (_CONVICTION_ORDER.get(x.get("conviction", "WATCHLIST"), 0),
+                                   x.get("vol_ratio", 0)),
+                    reverse=True):
+        sym = s.get("symbol", "")
+        if sym and sym not in seen:
+            seen[sym] = s
+
+    removed = len(candidates) - len(seen)
+    if removed:
+        logger.info(f"Watchlist dedup: removed {removed} duplicate entries")
+
+    return list(seen.values())
 
 
 if __name__ == "__main__":
-    # Quick test
     signals = [
         {"symbol": "A", "sector": "IT", "conviction": "HIGH", "rr": 2.5, "signal_type": "momentum"},
         {"symbol": "B", "sector": "IT", "conviction": "MODERATE", "rr": 1.8, "signal_type": "momentum"},

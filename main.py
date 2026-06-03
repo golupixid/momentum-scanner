@@ -4,9 +4,11 @@ Called by GitHub Actions for each of the 5 daily scan times.
 Run: python main.py [--time 8AM|10AM|11:30AM|1PM|3PM]
 """
 import argparse
+import csv
 import logging
 import sys
 from datetime import datetime
+from pathlib import Path
 import pytz
 
 logging.basicConfig(
@@ -16,6 +18,42 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 IST = pytz.timezone("Asia/Kolkata")
+
+HOLIDAYS_FILE = Path(__file__).parent / "data" / "holidays" / "nse_holidays.csv"
+
+
+def _load_nse_holidays() -> set:
+    """Load holiday dates from nse_holidays.csv. Returns set of 'YYYY-MM-DD' strings."""
+    if not HOLIDAYS_FILE.exists():
+        return set()
+    holidays = set()
+    with open(HOLIDAYS_FILE, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            date_str = row.get("date", "").strip()
+            if date_str:
+                holidays.add(date_str)
+    return holidays
+
+
+def _is_nse_holiday(today: datetime = None) -> tuple:
+    """
+    Return (is_holiday: bool, description: str).
+    today should be IST datetime; defaults to now(IST).
+    """
+    now_ist = today or datetime.now(IST)
+    today_str = now_ist.strftime("%Y-%m-%d")
+    holidays = _load_nse_holidays()
+    if today_str in holidays:
+        holidays_with_desc = {}
+        if HOLIDAYS_FILE.exists():
+            with open(HOLIDAYS_FILE, newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    holidays_with_desc[row.get("date", "").strip()] = row.get("description", "Holiday")
+        desc = holidays_with_desc.get(today_str, "NSE Holiday")
+        return True, desc
+    return False, ""
 
 
 def is_8am_scan(scan_time: datetime) -> bool:
@@ -130,6 +168,12 @@ def main():
 
     scan_time = datetime.now(IST)
     logger.info(f"Scan triggered at {scan_time.strftime('%H:%M IST')} | mode={args.time}")
+
+    # Fix 2: NSE holiday check — exit cleanly, no Telegram message
+    is_holiday, holiday_desc = _is_nse_holiday(scan_time)
+    if is_holiday:
+        logger.info(f"Today is NSE holiday ({holiday_desc}) — skipping scan")
+        sys.exit(0)
 
     if args.dry_run:
         import os

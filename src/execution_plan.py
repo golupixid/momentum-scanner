@@ -151,13 +151,22 @@ def build_execution_plan(symbol: str, signal: dict, df_hourly: pd.DataFrame,
         entry_low = entry_high = close  # fallback
 
     entry_mid = (entry_low + entry_high) / 2
-    stop_atr, stop_swing = _get_stop_loss(df_hourly, entry_mid)
+
+    # Fix 7: SL must be calculated from entry_low (lower band), not entry_mid
+    stop_atr, stop_swing = _get_stop_loss(df_hourly, entry_low)
     t1 = _get_t1_resistance(df_hourly)
 
-    # Use tighter stop (higher value = closer to entry = tighter)
-    best_stop = max(stop_atr, stop_swing) if stop_atr > 0 and stop_swing > 0 else (stop_atr or stop_swing)
-    if best_stop <= 0:
-        best_stop = entry_mid * 0.97  # 3% default stop
+    # Only accept stops that are strictly BELOW entry_low (tightest valid stop)
+    valid_stops = [s for s in [stop_atr, stop_swing] if 0 < s < entry_low]
+    if valid_stops:
+        best_stop = max(valid_stops)  # highest = tightest stop below entry_low
+    else:
+        best_stop = round(entry_low * 0.97, 2)  # 3% below entry_low as fallback
+
+    # Validation: SL must be strictly less than entry_low — skip signal if not
+    if best_stop >= entry_low:
+        plan["error"] = "SL validation failed: stop not below entry zone lower band"
+        return plan
 
     rr = calculate_rr(entry_mid, best_stop, t1)
     timing = get_timing_status(scan_time)
