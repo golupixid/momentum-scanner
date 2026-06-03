@@ -151,12 +151,10 @@ def format_signal_card(signal: dict, plan: dict = None, news: dict = None,
         entry_high = plan.get("entry_high", 0)
         sl = plan.get("stop_recommended", 0)
         t1 = plan.get("t1", 0)
+        t2 = plan.get("t2", 0)   # pre-computed in execution_plan.py
         rr = plan.get("rr", 0)
         rr_rating = plan.get("rr_rating", {})
         timing = plan.get("timing", {})
-
-        # T2 estimate: T1 + (T1 - entry) * 0.67
-        t2 = round(t1 + (t1 - entry_low) * 0.67, 0) if t1 > entry_low > 0 else 0
 
         lines.extend([
             f"",
@@ -264,13 +262,15 @@ def build_footer_message(watchlist: list, overflow: list, global_status,
     ]
 
     if watchlist:
-        lines.append("*⚠️ LOW / WATCHLIST:* (DO NOT TRADE — monitor only)")
+        lines.append("*⚠️ WATCHLIST — Next Best Candidates:* (qualified but didn't make top 5)")
         for sig in watchlist[:10]:
             sym = sig.get("symbol", "")
             conv = sig.get("conviction", "WATCHLIST")
             pattern = sig.get("pattern", "")
             sector = symbol_sector_map.get(sym, "Unknown")
             lines.append(f"  🔥 {sym} | {sector} | {pattern} | {conv}")
+    else:
+        lines.append("*⚠️ WATCHLIST:* No watchlist candidates today")
 
     if overflow:
         lines.append("")

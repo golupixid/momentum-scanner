@@ -200,7 +200,16 @@ def full_scan_pipeline(scan_time: datetime = None) -> dict:
 
     logger.info(
         f"Stage 1 done: {time.time()-t0:.0f}s | regime={market_regime} | "
-        f"data: W={len(weekly_data)} D={len(daily_data)} H={len(hourly_data)} symbols"
+        f"data: W={len(weekly_data)}/{len(all_symbols)} "
+        f"D={len(daily_data)}/{len(all_symbols)} "
+        f"H={len(hourly_data)}/{len(all_symbols)} symbols with data"
+    )
+    # Debug: show data completeness — key to diagnosing cloud vs local differences
+    w_pct = len(weekly_data) / max(len(all_symbols), 1) * 100
+    d_pct = len(daily_data)  / max(len(all_symbols), 1) * 100
+    logger.info(
+        f"DEBUG data coverage: Weekly={w_pct:.0f}% Daily={d_pct:.0f}% "
+        f"| FNO stocks in universe: {len(fno_stocks & set(all_symbols))}"
     )
 
     # ── Fix 4: Active registry cleanup — remove T1/SL/expired, get blocked symbols ──
@@ -241,31 +250,50 @@ def full_scan_pipeline(scan_time: datetime = None) -> dict:
         oi_cache=oi_cache,  # Fix 5: pass OI cache
     )
 
-    # Fix 3: Dedup within each signal_type (same symbol+type → keep best conviction)
+    # Dedup within each signal_type (same symbol+type → keep best conviction)
     all_signals = dedup_signals_within_type(all_signals)
 
     # Dedup against already-sent today
     all_signals = dedup_signals(all_signals)
-    logger.info(f"Stage 3 done: {len(all_signals)} unique signals")
+
+    # Debug: signal count per category before ranking
+    signal_groups = split_signals_by_type(all_signals)
+    logger.info(
+        f"Stage 3 done: {len(all_signals)} unique signals | "
+        f"MOM_raw={len(signal_groups.get('momentum', []))} "
+        f"REV_raw={len(signal_groups.get('reversal', []))} "
+        f"FNO_raw={len(signal_groups.get('fno', []))}"
+    )
 
     # ── Stage 4: Execution plans ─────────────────────────────────────────────
     plans = run_execution_plans(all_signals, hourly_data, scan_time)
 
-    # ── Stage 5: Rank + sector cap ──────────────────────────────────────────
-    signal_groups = split_signals_by_type(all_signals)
+    # ── Stage 5: Rank + sector cap (global cross-category dedup) ────────────
+    # Priority order: FNO first → Momentum second → Reversal last.
+    # Once a symbol is selected in any category it is blocked from all others.
     rotating_sectors = []
 
     final = {}
     overflow_all = []
-    for group_name, group_sigs in signal_groups.items():
-        result = apply_sector_cap(group_sigs, symbol_sector_map, set(rotating_sectors))
+    selected_symbols: set = set()  # global dedup across all three categories
+
+    for group_name in ("fno", "momentum", "reversal"):
+        group_sigs = signal_groups.get(group_name, [])
+        # Remove symbols already selected in a higher-priority category
+        eligible = [s for s in group_sigs if s["symbol"] not in selected_symbols]
+        removed = len(group_sigs) - len(eligible)
+        if removed:
+            logger.info(
+                f"Global dedup: {group_name} removed {removed} cross-category "
+                f"duplicates before sector cap"
+            )
+        result = apply_sector_cap(eligible, symbol_sector_map, set(rotating_sectors))
         final[group_name] = result["top"]
+        selected_symbols.update(s["symbol"] for s in result["top"])
         overflow_all.extend(result["overflow"])
 
-    # Fix 6: Watchlist dedup — exclude main signal symbols, dedup within watchlist
-    main_signal_symbols = set(
-        s["symbol"] for group in final.values() for s in group
-    )
+    # Watchlist = all qualified signals NOT selected in any top-5 group
+    main_signal_symbols = set(s["symbol"] for group in final.values() for s in group)
     watchlist_sigs = get_watchlist_signals(
         all_signals, excluded_symbols=main_signal_symbols
     )

@@ -11,26 +11,46 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 NSE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
     "Referer": "https://www.nseindia.com/",
+    "Connection": "keep-alive",
 }
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 OI_CACHE_FILE = DATA_DIR / "active_signals" / "oi_cache.csv"
 
 
+def _get_nse_session():
+    """
+    Get a curl_cffi session with Chrome TLS fingerprint for NSE API.
+    NSE blocks plain requests from cloud IPs; curl_cffi bypasses this.
+    Falls back to plain requests if curl_cffi is unavailable.
+    """
+    try:
+        from curl_cffi import requests as cr
+        session = cr.Session(impersonate="chrome")
+        logger.debug("NSE: using curl_cffi Chrome session")
+    except ImportError:
+        session = requests.Session()
+        logger.debug("NSE: using plain requests session (curl_cffi not available)")
+    return session
+
+
 def fetch_nse_oi_data(symbol: str) -> dict:
     """
     Fetch OI data for FNO symbol from NSE option chain API.
+    Uses curl_cffi Chrome fingerprint to bypass GitHub Actions IP blocks.
     Returns {'prev_oi': float, 'curr_oi': float, 'pcr': float} or {} on failure.
     """
     try:
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=8)
+        session = _get_nse_session()
+        # Establish NSE session cookie first
+        session.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=10)
         url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
-        resp = session.get(url, headers=NSE_HEADERS, timeout=8)
+        resp = session.get(url, headers=NSE_HEADERS, timeout=10)
         if resp.status_code != 200:
             return {}
         data = resp.json()

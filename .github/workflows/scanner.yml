@@ -43,11 +43,41 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Debug environment
+        shell: bash
+        run: |
+          echo "=== Python & packages ==="
+          python --version
+          pip show curl_cffi yfinance pandas requests python-telegram-bot 2>/dev/null | grep -E "^(Name|Version):"
+          echo "=== Network reachability ==="
+          curl -s -o /dev/null -w "Yahoo Finance query1: %{http_code}\n" \
+            "https://query1.finance.yahoo.com/v8/finance/chart/RELIANCE.NS?range=5d&interval=1d" || true
+          curl -s -o /dev/null -w "Yahoo Finance query2: %{http_code}\n" \
+            "https://query2.finance.yahoo.com/v8/finance/chart/RELIANCE.NS?range=5d&interval=1d" || true
+          curl -s -o /dev/null -w "NSE India: %{http_code}\n" \
+            "https://www.nseindia.com" || true
+          echo "=== curl_cffi smoke test ==="
+          python -c "
+          from curl_cffi import requests as cr
+          s = cr.Session(impersonate='chrome120')
+          r = s.get('https://query1.finance.yahoo.com/v8/finance/chart/RELIANCE.NS?range=5d&interval=1d', timeout=15)
+          print(f'curl_cffi Yahoo test: HTTP {r.status_code}')
+          import json
+          try:
+              d = r.json()
+              rows = len(d.get('chart',{}).get('result',[{}])[0].get('timestamp',[]))
+              print(f'curl_cffi Yahoo data rows: {rows}')
+          except Exception as e:
+              print(f'Parse error: {e}')
+          " || echo "curl_cffi smoke test failed (non-fatal)"
+
       - name: Run scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SCAN_TYPE: ${{ github.event.inputs.scan_type || 'auto' }}
+          PYTHONUNBUFFERED: "1"
+          PYTHONIOENCODING: "utf-8"
         shell: bash
         run: |
           if [ "$SCAN_TYPE" = "weekly_report" ]; then

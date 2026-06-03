@@ -132,7 +132,7 @@ def build_execution_plan(symbol: str, signal: dict, df_hourly: pd.DataFrame,
     """
     plan = {
         "symbol": symbol, "entry_low": 0.0, "entry_high": 0.0,
-        "stop_atr": 0.0, "stop_swing": 0.0, "t1": 0.0,
+        "stop_atr": 0.0, "stop_swing": 0.0, "t1": 0.0, "t2": 0.0,
         "rr_atr": 0.0, "rr_swing": 0.0, "rr_rating": {},
         "timing": {}, "error": "",
     }
@@ -152,30 +152,38 @@ def build_execution_plan(symbol: str, signal: dict, df_hourly: pd.DataFrame,
 
     entry_mid = (entry_low + entry_high) / 2
 
-    # Fix 7: SL must be calculated from entry_low (lower band), not entry_mid
+    # SL calculated from entry_low (lower band of entry zone)
     stop_atr, stop_swing = _get_stop_loss(df_hourly, entry_low)
-    t1 = _get_t1_resistance(df_hourly)
 
-    # Only accept stops that are strictly BELOW entry_low (tightest valid stop)
+    # Only accept stops strictly BELOW entry_low
     valid_stops = [s for s in [stop_atr, stop_swing] if 0 < s < entry_low]
     if valid_stops:
-        best_stop = max(valid_stops)  # highest = tightest stop below entry_low
+        best_stop = max(valid_stops)   # highest = tightest valid stop
     else:
         best_stop = round(entry_low * 0.97, 2)  # 3% below entry_low as fallback
 
-    # Validation: SL must be strictly less than entry_low — skip signal if not
     if best_stop >= entry_low:
         plan["error"] = "SL validation failed: stop not below entry zone lower band"
         return plan
 
-    rr = calculate_rr(entry_mid, best_stop, t1)
     timing = get_timing_status(scan_time)
+
+    # T1 / T2 — risk-based targets from entry_mid (not swing-high).
+    # Formula: risk = entry_lower - SL,  T1 = mid + risk×1.5,  T2 = mid + risk×2.5
+    # Example: Entry zone ₹100–₹110 → mid=₹105, ATR=₹4
+    #   SL  = ₹100 − (4×1.5) = ₹94      risk = ₹100−₹94 = ₹6
+    #   T1  = ₹105 + (6×1.5) = ₹114     T2  = ₹105 + (6×2.5) = ₹120
+    risk = entry_low - best_stop
+    t1 = round(entry_mid + risk * 1.5, 2)
+    t2 = round(entry_mid + risk * 2.5, 2)
+
+    rr = calculate_rr(entry_mid, best_stop, t1)
 
     plan.update({
         "entry_low": entry_low, "entry_high": entry_high,
         "stop_atr": stop_atr, "stop_swing": stop_swing,
         "stop_recommended": best_stop,
-        "t1": t1, "rr": rr,
+        "t1": t1, "t2": t2, "rr": rr,
         "rr_rating": get_rr_rating(rr),
         "timing": timing,
     })

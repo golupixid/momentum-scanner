@@ -144,7 +144,7 @@ def register_signal(signal: dict, plan: dict = None) -> str:
     entry = plan.get("entry_low", 0) if plan else 0
     sl = plan.get("stop_recommended", 0) if plan else 0
     t1 = plan.get("t1", 0) if plan else 0
-    t2_estimate = round(t1 + (t1 - entry) * 0.67, 2) if t1 > entry > 0 else 0
+    t2_estimate = plan.get("t2", 0) if plan else 0  # pre-computed risk-based T2
 
     new_row = {
         "signal_id": signal_id,

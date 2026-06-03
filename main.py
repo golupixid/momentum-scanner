@@ -2,10 +2,18 @@
 Main entry point for Momentum Scanner scan runs.
 Called by GitHub Actions for each of the 5 daily scan times.
 Run: python main.py [--time 8AM|10AM|11:30AM|1PM|3PM]
+
+LOCAL TESTING: Create a .env file in the project root with:
+  TELEGRAM_BOT_TOKEN=your_token
+  TELEGRAM_CHAT_ID=your_chat_id
+The scanner will load it automatically so Telegram messages are sent during
+local test runs — matching what GitHub Actions produces.
+Use --dry-run to suppress Telegram during development.
 """
 import argparse
 import csv
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +26,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 IST = pytz.timezone("Asia/Kolkata")
+
+
+def _load_env_file():
+    """
+    Load .env file from project root for local testing.
+    Uses os.environ.setdefault so it never overrides env vars already set
+    (GitHub Actions secrets take precedence).
+    """
+    env_file = Path(__file__).parent / ".env"
+    if not env_file.exists():
+        return
+    loaded = 0
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            if os.environ.setdefault(k.strip(), v.strip()) == v.strip():
+                loaded += 1
+    if loaded:
+        logger.info(f"Loaded {loaded} vars from .env (local test mode)")
 
 HOLIDAYS_FILE = Path(__file__).parent / "data" / "holidays" / "nse_holidays.csv"
 
@@ -159,6 +187,10 @@ def run_full_scan(scan_time: datetime):
 
 
 def main():
+    # Load .env first — gives local test runs the same Telegram credentials
+    # that GitHub Actions gets from secrets. Safe: never overrides existing env vars.
+    _load_env_file()
+
     parser = argparse.ArgumentParser(description="NSE Momentum Scanner")
     parser.add_argument("--time", default="auto",
                         help="Scan time: 8AM|10AM|11:30AM|1PM|3PM|auto")

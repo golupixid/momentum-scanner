@@ -101,22 +101,19 @@ def split_signals_by_type(all_signals: list) -> dict:
     return {"momentum": momentum, "reversal": reversal, "fno": fno}
 
 
-def get_watchlist_signals(signals: list, min_conviction: str = "LOW",
-                           excluded_symbols: set = None) -> list:
+def get_watchlist_signals(signals: list, excluded_symbols: set = None) -> list:
     """
-    Fix 6: Return watchlist signals (LOW/WATCHLIST conviction) with:
-    1. Symbols already in main signals (msg 2/3/4) excluded
-    2. Deduplication within watchlist — each symbol appears at most once
-       with the highest conviction level
+    Return watchlist candidates — all signals not already selected in the top-5
+    groups, regardless of conviction level. These are next-best candidates to
+    monitor for the next scan.
+    Deduplication: each symbol appears at most once (highest conviction wins).
     """
     excluded_symbols = excluded_symbols or set()
-    threshold = _CONVICTION_ORDER.get(min_conviction, 2)
 
-    # Filter: only LOW/WATCHLIST, not already in main signals
+    # All signals not already in the top-5 selections
     candidates = [
         s for s in signals
-        if _CONVICTION_ORDER.get(s.get("conviction", "WATCHLIST"), 0) <= threshold
-        and s.get("symbol", "") not in excluded_symbols
+        if s.get("symbol", "") not in excluded_symbols
     ]
 
     # Dedup by symbol: keep highest conviction, then best vol_ratio on tie
@@ -131,7 +128,7 @@ def get_watchlist_signals(signals: list, min_conviction: str = "LOW",
 
     removed = len(candidates) - len(seen)
     if removed:
-        logger.info(f"Watchlist dedup: removed {removed} duplicate entries")
+        logger.debug(f"Watchlist dedup: removed {removed} duplicate entries")
 
     return list(seen.values())
 

@@ -45,20 +45,48 @@ def _get_session():
         return _session
     try:
         from curl_cffi import requests as cr
-        _session = cr.Session(impersonate="chrome")
-        logger.info("curl_cffi Chrome session ready")
-    except ImportError:
-        import requests
-        _session = requests.Session()
-        _session.headers.update({
-            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                           "AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36")
-        })
-        logger.warning("curl_cffi not available — falling back to plain requests")
+        _session = cr.Session(impersonate="chrome120")
+        logger.info("curl_cffi Chrome120 session ready")
+    except Exception:
+        try:
+            from curl_cffi import requests as cr
+            _session = cr.Session(impersonate="chrome")
+            logger.info("curl_cffi Chrome session ready")
+        except ImportError:
+            import requests
+            _session = requests.Session()
+            _session.headers.update({
+                "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36")
+            })
+            logger.warning("curl_cffi not available — falling back to plain requests")
     return _session
 
 
 # ── Direct Yahoo Finance v8 fetcher ──────────────────────────────────────────
+
+def _parse_yf_response(data: dict) -> pd.DataFrame:
+    """Parse Yahoo Finance v8 JSON into OHLCV DataFrame."""
+    result = data.get("chart", {}).get("result")
+    if not result:
+        return pd.DataFrame()
+    chart = result[0]
+    ts = chart.get("timestamp", [])
+    if not ts:
+        return pd.DataFrame()
+    quote = chart["indicators"]["quote"][0]
+    adjclose = (chart["indicators"].get("adjclose", [{}])[0]
+                .get("adjclose", quote.get("close", [])))
+    df = pd.DataFrame({
+        "Open":   quote.get("open",   [None]*len(ts)),
+        "High":   quote.get("high",   [None]*len(ts)),
+        "Low":    quote.get("low",    [None]*len(ts)),
+        "Close":  adjclose,
+        "Volume": quote.get("volume", [None]*len(ts)),
+    }, index=pd.to_datetime(ts, unit="s", utc=True).tz_convert(IST).normalize())
+    df.index.name = "Date"
+    return df.dropna(how="all").sort_index()
+
 
 def _fetch_one_yf(symbol_ns: str, interval: str, period: str = None,
                   start_ts: int = None, end_ts: int = None) -> pd.DataFrame:
@@ -66,6 +94,7 @@ def _fetch_one_yf(symbol_ns: str, interval: str, period: str = None,
     Fetch OHLCV for one Yahoo Finance ticker (e.g. 'RELIANCE.NS') by calling
     the v8/finance/chart endpoint directly via curl_cffi.
     Returns a DataFrame with DatetimeIndex and Open/High/Low/Close/Volume columns.
+    Retries up to 2 times on failure before returning empty DataFrame.
     """
     session = _get_session()
     params = {"interval": interval, "events": "history"}
@@ -76,37 +105,24 @@ def _fetch_one_yf(symbol_ns: str, interval: str, period: str = None,
     else:
         params["range"] = period or INTERVAL_PERIODS.get(interval, "6mo")
 
-    for base in (YF_BASE, FALLBACK):
+    endpoints = [YF_BASE, FALLBACK]
+    for attempt, base in enumerate(endpoints + [YF_BASE]):   # 3 tries total
         url = f"{base}/{symbol_ns}"
         try:
             r = session.get(url, params=params, timeout=PER_CALL_TIMEOUT)
+            if r.status_code == 429:
+                # Rate limited — brief pause before retry
+                time.sleep(1.0 if attempt < 2 else 2.0)
+                continue
             if r.status_code != 200:
                 continue
-            data   = r.json()
-            result = data.get("chart", {}).get("result")
-            if not result:
-                return pd.DataFrame()
-            chart  = result[0]
-            ts     = chart.get("timestamp", [])
-            if not ts:
-                return pd.DataFrame()
-
-            quote    = chart["indicators"]["quote"][0]
-            adjclose = (chart["indicators"].get("adjclose", [{}])[0]
-                        .get("adjclose", quote.get("close", [])))
-
-            df = pd.DataFrame({
-                "Open":   quote.get("open",   [None]*len(ts)),
-                "High":   quote.get("high",   [None]*len(ts)),
-                "Low":    quote.get("low",    [None]*len(ts)),
-                "Close":  adjclose,
-                "Volume": quote.get("volume", [None]*len(ts)),
-            }, index=pd.to_datetime(ts, unit="s", utc=True).tz_convert(IST).normalize())
-            df.index.name = "Date"
-            return df.dropna(how="all").sort_index()
-
+            df = _parse_yf_response(r.json())
+            if not df.empty:
+                return df
         except Exception as e:
-            logger.debug(f"{symbol_ns} {interval}: {e}")
+            logger.debug(f"{symbol_ns} {interval} attempt {attempt+1}: {e}")
+            if attempt < len(endpoints):
+                time.sleep(0.5)
 
     return pd.DataFrame()
 
