@@ -159,15 +159,35 @@ def get_oi_data(symbol: str, oi_cache: dict = None, df_daily: pd.DataFrame = Non
     return {"prev_oi": 0, "curr_oi": 0, "oi_change_pct": 0.0, "pcr": 1.0}
 
 
+def _nse_is_reachable() -> bool:
+    """
+    Quick check: can we reach NSE India at all?
+    Returns False fast if NSE is blocked (common on cloud runners).
+    Times out in 5s — much shorter than the per-symbol timeout.
+    """
+    try:
+        session = _get_nse_session()
+        r = session.get("https://www.nseindia.com", headers=NSE_HEADERS, timeout=5)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
 def build_oi_cache_for_fno(fno_stocks: set, daily_data: dict) -> dict:
     """
-    Fix 5: Build OI cache for all FNO stocks before parallel processing.
-    Tries NSE API first; falls back to volume proxy from already-fetched daily_data.
+    Build OI cache for all FNO stocks before parallel processing.
+    First checks if NSE is reachable. If not (common on cloud runners),
+    skips the per-symbol API calls entirely and uses volume proxy for all.
     Returns {symbol: oi_dict}.
     """
     cache = {}
     fno_list = sorted(fno_stocks)
     logger.info(f"FNO: Building OI cache for {len(fno_list)} FNO stocks")
+
+    # Quick connectivity pre-check — avoids 146 × 1s timeouts on cloud
+    nse_up = _nse_is_reachable()
+    if not nse_up:
+        logger.info("FNO OI: NSE unreachable — using volume proxy for all stocks (fast path)")
 
     nse_ok = 0
     proxy_used = 0
@@ -175,8 +195,8 @@ def build_oi_cache_for_fno(fno_stocks: set, daily_data: dict) -> dict:
     for symbol in fno_list:
         df_d = daily_data.get(symbol)
 
-        # Try NSE API
-        raw = fetch_nse_oi_data(symbol)
+        # Try NSE API only if NSE is reachable
+        raw = fetch_nse_oi_data(symbol) if nse_up else {}
         if raw:
             prev = raw.get("prev_oi", 0)
             curr = raw.get("curr_oi", 0)
