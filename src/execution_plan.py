@@ -254,9 +254,9 @@ def build_execution_plan(symbol: str, signal: dict, df_hourly: pd.DataFrame,
         t2 = round(t1 + atr * 1.5, 2)   # force T2 above T1 as final fallback
 
     # ── Validations ───────────────────────────────────────────────────────────
-    t1_min = round(entry_mid * 1.05, 2)
+    t1_min = round(entry_mid * 1.03, 2)  # relaxed from 5% → 3% for more signal coverage
     if t1 <= t1_min:
-        plan["error"] = f"T1 {t1:.2f} not 5% above entry_mid {entry_mid:.2f} — signal too weak"
+        plan["error"] = f"T1 {t1:.2f} not 3% above entry_mid {entry_mid:.2f} — signal too weak"
         return plan
 
     if t2 <= t1:

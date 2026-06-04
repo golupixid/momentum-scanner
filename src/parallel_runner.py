@@ -21,7 +21,7 @@ IST = pytz.timezone("Asia/Kolkata")
 
 # Execution plan errors that mean "exclude this signal from results"
 _EXCLUDE_ERRORS = [
-    "T1 not 5% above", "not 5% above", "not above T1",
+    "not 3% above", "not above T1",
     "too late", "Journey", "Invalid close",
     "Insufficient daily",
 ]
@@ -35,6 +35,41 @@ def _plan_should_exclude(plan: dict) -> bool:
     if not err:
         return False
     return any(kw.lower() in err.lower() for kw in _EXCLUDE_ERRORS)
+
+
+def _log_base_condition_failures(passing_symbols: list, daily_data: dict) -> None:
+    """Diagnose why MOM/REV raw signals are zero — counts each base-condition failure."""
+    from src.indicators import add_daily_indicators, is_supertrend_bullish, is_volume_sufficient
+    counts = {"no_data": 0, "below_ema20": 0, "low_vol": 0, "st_bearish": 0, "pass_base": 0}
+    for sym in passing_symbols:
+        df_raw = daily_data.get(sym)
+        if df_raw is None or len(df_raw) < 22:
+            counts["no_data"] += 1
+            continue
+        try:
+            df = add_daily_indicators(df_raw)
+            last = df.iloc[-1]
+            close = float(last["Close"])
+            ema20_val = last.get("ema20")
+            ema20 = float(ema20_val) if ema20_val is not None and not pd.isna(ema20_val) else None
+            if ema20 is None or close <= ema20:
+                counts["below_ema20"] += 1
+                continue
+            if not is_volume_sufficient(df, 1.3):
+                counts["low_vol"] += 1
+                continue
+            if not is_supertrend_bullish(df):
+                counts["st_bearish"] += 1
+                continue
+            counts["pass_base"] += 1
+        except Exception:
+            counts["no_data"] += 1
+    logger.info(
+        f"MOM/REV base-condition breakdown ({len(passing_symbols)} symbols): "
+        f"no_data={counts['no_data']} | below_EMA20={counts['below_ema20']} | "
+        f"low_vol={counts['low_vol']} | supertrend_bearish={counts['st_bearish']} | "
+        f"pass_all_base={counts['pass_base']}"
+    )
 
 
 def _process_symbol(args) -> list:
@@ -132,11 +167,13 @@ def run_parallel_processing(symbols: list, daily_data: dict, weekly_data: dict,
 
 def run_execution_plans(signals: list, hourly_data: dict, daily_data: dict,
                          scan_time: datetime = None) -> dict:
-    """Stage 4: Build execution plans for HIGH/MODERATE signals only."""
+    """Stage 4: Build execution plans for HIGH/MODERATE signals and ALL FNO signals."""
     from src.execution_plan import build_execution_plan
     plans = {}
-    high_mod = [s for s in signals if s.get("conviction") in ("HIGH", "MODERATE")]
-    for sig in high_mod:
+    plan_targets = [s for s in signals
+                    if s.get("conviction") in ("HIGH", "MODERATE")
+                    or s.get("signal_type") == "fno"]
+    for sig in plan_targets:
         sym  = sig["symbol"]
         df_h = hourly_data.get(sym)
         df_d = daily_data.get(sym)
@@ -348,6 +385,10 @@ def full_scan_pipeline(scan_time: datetime = None, real_run: bool = False) -> di
         f"FNO_raw={len(signal_groups.get('fno', []))}"
     )
 
+    # Diagnostic: when MOM or REV are zero, explain why base conditions fail
+    if len(signal_groups.get("momentum", [])) == 0 or len(signal_groups.get("reversal", [])) == 0:
+        _log_base_condition_failures(passing_symbols, daily_data)
+
     # ── Stage 4: Execution plans ─────────────────────────────────────────────
     plans = run_execution_plans(all_signals, hourly_data, daily_data, scan_time)
 
@@ -355,10 +396,15 @@ def full_scan_pipeline(scan_time: datetime = None, real_run: bool = False) -> di
     validated_signals = []
     excluded_count = 0
     for s in all_signals:
-        sym = s.get("symbol", "")
-        plan = plans.get(sym)
-        if s.get("conviction") in ("HIGH", "MODERATE") and _plan_should_exclude(plan):
-            logger.info(f"Plan validation excluded {sym}: {plan.get('error','')}")
+        sym   = s.get("symbol", "")
+        stype = s.get("signal_type", "")
+        conv  = s.get("conviction", "")
+        plan  = plans.get(sym)
+        # Apply validation to HIGH/MODERATE conviction signals and ALL FNO signals
+        should_validate = conv in ("HIGH", "MODERATE") or stype == "fno"
+        if should_validate and _plan_should_exclude(plan):
+            err = plan.get("error", "") if plan else "no plan built"
+            logger.info(f"Plan excluded {sym} ({stype}/{conv}): {err}")
             excluded_count += 1
         else:
             validated_signals.append(s)
