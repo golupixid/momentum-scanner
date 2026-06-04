@@ -186,6 +186,53 @@ def format_signal_card(signal: dict, plan: dict = None, news: dict = None,
     return "\n".join(lines)
 
 
+def format_caution_card(signal: dict, plan: dict = None, rank: int = 1) -> str:
+    """Signal card for T1 1-3% candidates — clearly marked for manual verification."""
+    sym       = signal.get("symbol", "")
+    cap       = signal.get("cap_type", "Large")
+    sector    = signal.get("sector", "Unknown")
+    close     = signal.get("close", 0)
+    vol_ratio = signal.get("vol_ratio", 0)
+    t1_pct    = signal.get("_caution_t1_pct", 0)
+    cap_e     = _cap_emoji(cap)
+
+    lines = [
+        f"⚠️ *CAUTION — T1 ONLY {t1_pct:.1f}% — VERIFY MANUALLY*",
+        f"",
+        f"[{rank}] *{sym}* {cap_e}",
+        f"{cap} | {sector}",
+        f"",
+        f"{_signal_type_line(signal)}",
+        f"",
+        f"💰 Price: ₹{close:.2f}",
+        f"📊 Vol: {vol_ratio:.1f}x",
+    ]
+
+    if plan and plan.get("entry_low", 0) > 0:
+        entry_low  = plan.get("entry_low", 0)
+        entry_high = plan.get("entry_high", 0)
+        sl         = plan.get("stop_recommended", 0)
+        t1         = plan.get("t1", 0)
+        t2         = plan.get("t2", 0)
+        rr         = plan.get("rr", 0)
+        lines.extend([
+            f"",
+            f"🎯 Buy: ₹{entry_low:.0f}–₹{entry_high:.0f}",
+            f"🛑 SL: ₹{sl:.0f}",
+            f"🎯 T1: ₹{t1:.0f} (+{t1_pct:.1f}% — CLOSE)",
+            f"🎯 Bonus T2: ₹{t2:.0f} (if strong move)",
+            f"📊 R:R {rr:.1f}",
+        ])
+
+    lines.extend([
+        f"",
+        f"_T1 is only {t1_pct:.1f}% — check chart manually before trading._",
+        f"_If momentum looks strong, consider holding for T2 directly._",
+    ])
+
+    return "\n".join(lines)
+
+
 # ── 5-message scan formatter ──────────────────────────────────────────────────
 
 def build_header_message(regime: str, sector_status: dict, rotating_sectors: list,
@@ -254,9 +301,10 @@ def build_header_message(regime: str, sector_status: dict, rotating_sectors: lis
 
 
 def build_signal_group_message(title: str, signals: list, plans: dict,
-                                news_data: dict, symbol_info: dict) -> str:
-    """Messages 2/3/4: Signal groups (momentum, reversal, FNO)."""
-    if not signals:
+                                news_data: dict, symbol_info: dict,
+                                caution_signals: list = None) -> str:
+    """Messages 2/3/4: Signal groups (momentum, reversal, FNO) with optional caution section."""
+    if not signals and not caution_signals:
         return f"*{title}*\n\n_No signals this scan_"
 
     lines = [f"*{title}*", ""]
@@ -270,6 +318,22 @@ def build_signal_group_message(title: str, signals: list, plans: dict,
         card = format_signal_card(sig, plan, news, rank=i)
         lines.append(card)
         lines.append("─" * 30)
+
+    if caution_signals:
+        lines.extend([
+            "",
+            "─" * 20,
+            "⚠️ CAUTION SIGNALS BELOW",
+            "─" * 20,
+            "",
+        ])
+        for i, sig in enumerate(caution_signals, len(signals[:5]) + 1):
+            info = symbol_info.get(sig.get("symbol", ""), {})
+            sig["sector"]   = sig.get("sector")   or info.get("sector",   "Unknown")
+            sig["cap_type"] = sig.get("cap_type") or info.get("cap_type", "Large")
+            card = format_caution_card(sig, sig.get("_caution_plan"), rank=i)
+            lines.append(card)
+            lines.append("─" * 20)
 
     return "\n".join(lines)
 

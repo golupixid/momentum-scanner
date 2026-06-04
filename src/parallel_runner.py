@@ -96,7 +96,9 @@ def _process_symbol(args) -> list:
 
         df_daily_ind = add_daily_indicators(df_daily)
 
-        momentum = get_momentum_signals(symbol, df_daily, df_weekly, cap_type)
+        # CHANGE 1: skip momentum for stocks below 20W EMA (reversal-only candidates)
+        momentum = ([] if gate_status == "REV_ONLY"
+                    else get_momentum_signals(symbol, df_daily, df_weekly, cap_type))
         reversal = get_reversal_signals(symbol, df_daily, is_fno, oi_data, pcr)
 
         all_signals = momentum + reversal
@@ -167,13 +169,10 @@ def run_parallel_processing(symbols: list, daily_data: dict, weekly_data: dict,
 
 def run_execution_plans(signals: list, hourly_data: dict, daily_data: dict,
                          scan_time: datetime = None) -> dict:
-    """Stage 4: Build execution plans for HIGH/MODERATE signals and ALL FNO signals."""
+    """Stage 4: Build execution plans for all signals (enables caution card detection)."""
     from src.execution_plan import build_execution_plan
     plans = {}
-    plan_targets = [s for s in signals
-                    if s.get("conviction") in ("HIGH", "MODERATE")
-                    or s.get("signal_type") == "fno"]
-    for sig in plan_targets:
+    for sig in signals:
         sym  = sig["symbol"]
         df_h = hourly_data.get(sym)
         df_d = daily_data.get(sym)
@@ -342,8 +341,6 @@ def full_scan_pipeline(scan_time: datetime = None, real_run: bool = False) -> di
     passing_gate  = gate_results["passing"]
 
     # FIX 7: Re-insert excluded FNO stocks as MARGINAL so FNO signals can fire.
-    # SHORT_COVER and LONG_UNWIND happen on bearish stocks that are BELOW 20W EMA
-    # — the normal weekly gate would exclude them, leaving FNO count = 0.
     excluded_fno = [s for s in gate_results.get("excluded", [])
                     if s in fno_stocks and s in daily_data]
     if excluded_fno:
@@ -352,10 +349,24 @@ def full_scan_pipeline(scan_time: datetime = None, real_run: bool = False) -> di
             gate_results["details"][sym]["status"] = "MARGINAL"
         passing_gate = list(passing_gate) + excluded_fno
 
+    # CHANGE 1: Re-insert excluded non-FNO stocks for reversal-only processing.
+    # Reversal stocks may be below 20W EMA — they are recovering from weakness.
+    excluded_rev = [s for s in gate_results.get("excluded", [])
+                    if s not in fno_stocks and s in daily_data]
+    if excluded_rev:
+        logger.info(
+            f"Reversal gate bypass: {len(excluded_rev)} stocks below 20W EMA "
+            f"added for reversal-only signal detection"
+        )
+        for sym in excluded_rev:
+            gate_results["details"][sym]["status"] = "REV_ONLY"
+        passing_gate = list(passing_gate) + excluded_rev
+
     logger.info(
         f"Weekly gate: {len(gate_results['eligible'])} eligible, "
         f"{len(gate_results['marginal'])} marginal, "
-        f"{len(gate_results['excluded'])} excluded → {len(passing_gate)} to filters"
+        f"{len(gate_results['excluded'])} excluded "
+        f"→ {len(passing_gate)} to filters (incl FNO+REV bypasses)"
     )
 
     filter_report   = apply_all_filters(
@@ -392,7 +403,8 @@ def full_scan_pipeline(scan_time: datetime = None, real_run: bool = False) -> di
     # ── Stage 4: Execution plans ─────────────────────────────────────────────
     plans = run_execution_plans(all_signals, hourly_data, daily_data, scan_time)
 
-    # Filter signals that fail execution plan validation (journey filter, price>T1, etc.)
+    # Filter signals via execution plan validation; collect T1 1-3% failures as caution candidates
+    caution_pool = {"momentum": [], "reversal": []}
     validated_signals = []
     excluded_count = 0
     for s in all_signals:
@@ -400,10 +412,19 @@ def full_scan_pipeline(scan_time: datetime = None, real_run: bool = False) -> di
         stype = s.get("signal_type", "")
         conv  = s.get("conviction", "")
         plan  = plans.get(sym)
-        # Apply validation to HIGH/MODERATE conviction signals and ALL FNO signals
-        should_validate = conv in ("HIGH", "MODERATE") or stype == "fno"
-        if should_validate and _plan_should_exclude(plan):
+        if _plan_should_exclude(plan):
             err = plan.get("error", "") if plan else "no plan built"
+            # T1 between 1-3%: caution candidate for MOM/REV only (not FNO)
+            if plan and "not 3% above" in err and stype in ("momentum", "reversal"):
+                t1_val = plan.get("t1", 0)
+                el, eh = plan.get("entry_low", 0), plan.get("entry_high", 0)
+                em = (el + eh) / 2.0
+                if em > 0 and t1_val > 0:
+                    t1_pct = (t1_val - em) / em * 100
+                    if 1.0 <= t1_pct < 3.0:
+                        s["_caution_t1_pct"] = round(t1_pct, 2)
+                        s["_caution_plan"] = plan
+                        caution_pool[stype].append(s)
             logger.info(f"Plan excluded {sym} ({stype}/{conv}): {err}")
             excluded_count += 1
         else:
@@ -411,7 +432,6 @@ def full_scan_pipeline(scan_time: datetime = None, real_run: bool = False) -> di
     if excluded_count:
         logger.info(f"Stage 4: excluded {excluded_count} signals via execution plan validation")
     all_signals = validated_signals
-    # Re-split after filtering
     signal_groups = split_signals_by_type(all_signals)
 
     # ── Stage 5: Rank + sector cap (global cross-category dedup) ─────────────
@@ -439,6 +459,28 @@ def full_scan_pipeline(scan_time: datetime = None, real_run: bool = False) -> di
         f"REV={len(final.get('reversal', []))} "
         f"FNO={len(final.get('fno', []))} overflow={len(overflow_all)}"
     )
+
+    # ── CHANGE 2: Fill empty slots with caution candidates (T1 1-3%, MOM/REV only) ──
+    caution_final = {"momentum": [], "reversal": []}
+    caution_selected = set(selected_symbols)  # never overlap with main signals
+    for group_name in ("momentum", "reversal"):
+        empty_slots = max(0, 5 - len(final.get(group_name, [])))
+        if empty_slots > 0 and caution_pool.get(group_name):
+            pool_sorted = sorted(
+                caution_pool[group_name],
+                key=lambda x: x.get("_caution_t1_pct", 0), reverse=True,
+            )
+            for candidate in pool_sorted:
+                if candidate["symbol"] not in caution_selected:
+                    caution_final[group_name].append(candidate)
+                    caution_selected.add(candidate["symbol"])
+                    if len(caution_final[group_name]) >= empty_slots:
+                        break
+    if any(caution_final.values()):
+        logger.info(
+            f"Caution cards: MOM={len(caution_final['momentum'])} "
+            f"REV={len(caution_final['reversal'])} (T1 1-3%, not written to registry)"
+        )
 
     # ── Proximity watchlist for footer ───────────────────────────────────────
     proximity_wl = compute_proximity_watchlist(passing_symbols, daily_data, main_signal_symbols)
@@ -481,6 +523,8 @@ def full_scan_pipeline(scan_time: datetime = None, real_run: bool = False) -> di
         "momentum":         final.get("momentum", []),
         "reversal":         final.get("reversal", []),
         "fno":              final.get("fno", []),
+        "momentum_caution": caution_final.get("momentum", []),
+        "reversal_caution": caution_final.get("reversal", []),
         "momentum_wl":      proximity_wl["momentum_wl"],
         "reversal_wl":      proximity_wl["reversal_wl"],
         "plans":            plans,

@@ -142,10 +142,12 @@ def run_full_scan(scan_time: datetime, real_run: bool = False):
     msg2 = build_signal_group_message(
         f"TOP 5 MOMENTUM BREAKOUT ({len(results['momentum'])} signals)",
         results["momentum"], results["plans"], results["news_data"], sym_info,
+        caution_signals=results.get("momentum_caution", []),
     )
     msg3 = build_signal_group_message(
         f"TOP 5 REVERSAL A+B ({len(results['reversal'])} signals)",
         results["reversal"], results["plans"], results["news_data"], sym_info,
+        caution_signals=results.get("reversal_caution", []),
     )
     msg4 = build_signal_group_message(
         f"TOP 5 FNO SIGNALS ({len(results['fno'])} signals)",

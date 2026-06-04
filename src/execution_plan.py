@@ -256,6 +256,14 @@ def build_execution_plan(symbol: str, signal: dict, df_hourly: pd.DataFrame,
     # ── Validations ───────────────────────────────────────────────────────────
     t1_min = round(entry_mid * 1.03, 2)  # relaxed from 5% → 3% for more signal coverage
     if t1 <= t1_min:
+        # Store computed values so caution cards can display entry/SL/T1/T2
+        _rr = calculate_rr(entry_mid, best_stop, t1)
+        plan.update({
+            "entry_low": entry_low, "entry_high": entry_high,
+            "stop_recommended": best_stop, "t1": t1, "t2": t2,
+            "rr": _rr, "rr_rating": get_rr_rating(_rr),
+            "timing": get_timing_status(scan_time), "atr": round(atr, 2),
+        })
         plan["error"] = f"T1 {t1:.2f} not 3% above entry_mid {entry_mid:.2f} — signal too weak"
         return plan
 
