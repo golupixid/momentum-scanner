@@ -209,23 +209,25 @@ def build_header_message(regime: str, sector_status: dict, rotating_sectors: lis
     ]
 
     # GIFT Nifty (using ^NSEI proxy)
-    gift_pct = getattr(global_status, "gift_nifty_change_pct", 0.0)
-    gift_arrow = "▲" if gift_pct >= 0 else "▼"
-    gift_sign  = "+" if gift_pct >= 0 else ""
-    lines.append(f"  {gift_arrow} GIFT Nifty: {gift_sign}{gift_pct:.2f}%")
+    gift_pct    = getattr(global_status, "gift_nifty_change_pct", 0.0)
+    gift_circle = "🟢" if gift_pct > 0 else ("🔴" if gift_pct < 0 else "⚪")
+    gift_arrow  = "▲" if gift_pct >= 0 else "▼"
+    gift_sign   = "+" if gift_pct >= 0 else ""
+    lines.append(f"  {gift_circle} {gift_arrow} GIFT Nifty: {gift_sign}{gift_pct:.2f}%")
 
     # Other global indices from indices_data
     idx_data = getattr(global_status, "indices_data", {})
     for ticker in _HEADER_INDICES:
         if ticker in idx_data:
-            pct   = idx_data[ticker]
-            name  = _INDEX_NAMES.get(ticker, ticker)
-            arrow = "▲" if pct >= 0 else "▼"
-            sign  = "+" if pct >= 0 else ""
-            lines.append(f"  {arrow} {name}: {sign}{pct:.2f}%")
+            pct    = idx_data[ticker]
+            name   = _INDEX_NAMES.get(ticker, ticker)
+            circle = "🟢" if pct > 0 else ("🔴" if pct < 0 else "⚪")
+            arrow  = "▲" if pct >= 0 else "▼"
+            sign   = "+" if pct >= 0 else ""
+            lines.append(f"  {circle} {arrow} {name}: {sign}{pct:.2f}%")
         else:
             name = _INDEX_NAMES.get(ticker, ticker)
-            lines.append(f"  — {name}: N/A")
+            lines.append(f"  ⚪ — {name}: N/A")
 
     # Global bleeding warning
     if global_status.bleeding:
@@ -279,8 +281,13 @@ def build_footer_message(momentum_wl: list, reversal_wl: list) -> str:
     Only stocks within -3% of their breakout/reversal trigger level.
     """
     lines = [
-        "EMOJI GUIDE: HIGH=4xfire MODERATE=3xfire LOW=2xfire WATCHLIST=1xfire",
-        "Large cap=blue  Mid cap=yellow  Small cap=red",
+        "📊 EMOJI GUIDE:",
+        "🚀 Momentum | 🔄 Reversal | 📈 FNO",
+        "⭐⭐⭐⭐ High | ⭐⭐⭐ Moderate | ⭐⭐ Low",
+        "🟢 Buy zone | 🔴 Stop loss | 🎯 Target",
+        "🔵 Large cap | 🟡 Mid cap | 🔴 Small cap",
+        "📈 RSI rising | 📉 RSI falling",
+        "✅ Confirmed | ⚠️ Caution",
         "",
     ]
 
@@ -293,7 +300,7 @@ def build_footer_message(momentum_wl: list, reversal_wl: list) -> str:
             close   = item["close"]
             prox    = item["prox_pct"]  # negative = below trigger
             lines.append(
-                f"  {sym} | Breakout: {trigger:.2f} | Now: {close:.2f} | {prox:.1f}%"
+                f"  • {sym} | Breakout: ₹{trigger:.2f} | Current: ₹{close:.2f} | {prox:.1f}% away"
             )
     else:
         lines.append("  No stocks within -3% of breakout level today")
@@ -309,13 +316,13 @@ def build_footer_message(momentum_wl: list, reversal_wl: list) -> str:
             close   = item["close"]
             prox    = item["prox_pct"]
             lines.append(
-                f"  {sym} | Trigger EMA: {trigger:.2f} | Now: {close:.2f} | {prox:.1f}%"
+                f"  • {sym} | Trigger EMA: ₹{trigger:.2f} | Current: ₹{close:.2f} | {prox:.1f}% away"
             )
     else:
         lines.append("  No stocks within -3% of reversal trigger today")
 
     lines.append("")
-    lines.append("Not SEBI advice. Personal research only. Use stop losses.")
+    lines.append("⚠️ Not SEBI registered advice. Trade at your own risk.")
 
     return "\n".join(lines)
 
