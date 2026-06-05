@@ -28,6 +28,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Pull latest data files
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git pull origin master
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:

@@ -361,6 +361,17 @@ def full_scan_pipeline(scan_time: datetime = None, real_run: bool = False) -> di
         f"H={len(hourly_data)}/{len(all_symbols)}"
     )
 
+    # ── Pre-load daily shown files (read at scan start, before any signal processing) ──
+    caution_shown_today, caution_shown_rows = _load_shown_today(_CAUTION_SHOWN_FILE, "symbol")
+    _, watchlist_shown_rows = _load_shown_today(_WATCHLIST_SHOWN_FILE, "symbol")
+    mom_shown_today = {r["symbol"] for r in watchlist_shown_rows if r.get("category") == "momentum"}
+    rev_shown_today = {r["symbol"] for r in watchlist_shown_rows if r.get("category") == "reversal"}
+    logger.info(
+        f"Daily shown pre-load: caution={len(caution_shown_today)} symbols "
+        f"({sorted(caution_shown_today) or 'none'}) | "
+        f"watchlist MOM={len(mom_shown_today)} REV={len(rev_shown_today)} symbols"
+    )
+
     # Registry cleanup (read-only in test mode)
     blocked_symbols = cleanup_and_get_blocked(daily_data, real_run=real_run)
     logger.info(f"Registry: {len(blocked_symbols)} symbols blocked")
@@ -497,7 +508,6 @@ def full_scan_pipeline(scan_time: datetime = None, real_run: bool = False) -> di
     # ── CHANGE 2: Fill empty slots with caution candidates (T1 1-3%, MOM/REV only) ──
     caution_final = {"momentum": [], "reversal": []}
     caution_selected = set(selected_symbols)  # never overlap with main signals
-    caution_shown_today, caution_shown_rows = _load_shown_today(_CAUTION_SHOWN_FILE, "symbol")
     for group_name in ("momentum", "reversal"):
         empty_slots = max(0, 5 - len(final.get(group_name, [])))
         if empty_slots > 0 and caution_pool.get(group_name):
@@ -530,9 +540,6 @@ def full_scan_pipeline(scan_time: datetime = None, real_run: bool = False) -> di
     proximity_wl = compute_proximity_watchlist(passing_symbols, daily_data, main_signal_symbols)
 
     # Filter watchlist by already-shown today per category (no-repeat same day)
-    _, watchlist_shown_rows = _load_shown_today(_WATCHLIST_SHOWN_FILE, "symbol")
-    mom_shown_today = {r["symbol"] for r in watchlist_shown_rows if r.get("category") == "momentum"}
-    rev_shown_today = {r["symbol"] for r in watchlist_shown_rows if r.get("category") == "reversal"}
     filtered_mom_wl = [s for s in proximity_wl["momentum_wl"] if s["symbol"] not in mom_shown_today]
     filtered_rev_wl = [s for s in proximity_wl["reversal_wl"] if s["symbol"] not in rev_shown_today]
     if real_run:

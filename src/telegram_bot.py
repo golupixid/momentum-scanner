@@ -20,15 +20,17 @@ PARSE_MODE  = "Markdown"
 
 # Global index ticker → display name for the header
 _INDEX_NAMES = {
-    "YM=F":   "Dow Jones",
-    "NQ=F":   "Nasdaq",
+    "^DJI":   "Dow Jones",
+    "^IXIC":  "Nasdaq",
+    "YM=F":   "Dow Jones (fut)",
+    "NQ=F":   "Nasdaq (fut)",
     "ES=F":   "S&P 500",
     "^N225":  "Nikkei",
     "^HSI":   "Hang Seng",
     "^KS11":  "KOSPI",
 }
-# The 5 indices shown in the header (in order)
-_HEADER_INDICES = ["YM=F", "NQ=F", "^N225", "^HSI"]
+# Indices shown in the header (in order) — cash indices preferred, futures as fallback keys
+_HEADER_INDICES = ["^DJI", "^IXIC", "^N225", "^HSI"]
 
 
 async def _send_async(token: str, chat_id: str, text: str, parse_mode: str = PARSE_MODE):
