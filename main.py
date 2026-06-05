@@ -1,6 +1,6 @@
 """
 Main entry point for NSE Momentum Scanner.
-Called by GitHub Actions for each of the 5 daily scan times.
+Called by GitHub Actions for each manual trigger.
 
 LOCAL TESTING:
   Create .env in project root with:
@@ -19,7 +19,6 @@ FLAGS:
   --real-run        Write signals to active_signals.csv (GitHub Actions / real market runs)
   --dry-run         Skip Telegram send (silent test)
   --clear-registry  Wipe active_signals.csv and exit
-  --time 8AM|...    Force a specific scan time slot
 """
 import argparse
 import csv
@@ -84,42 +83,6 @@ def _is_nse_holiday(today: datetime = None) -> tuple:
     return False, ""
 
 
-def is_8am_scan(scan_time: datetime) -> bool:
-    return scan_time.hour == 8 and scan_time.minute < 30
-
-
-def run_pre_market_scan(scan_time: datetime):
-    """8 AM pre-market: global + GIFT + rotation (no trade signals)."""
-    from src.global_markets import check_global_bleeding, get_global_summary
-    from src.market_regime import get_market_regime, get_regime_emoji
-    from src.sector_bleeding import get_all_sector_status
-    from src.telegram_bot import send_message
-
-    logger.info("Running 8AM pre-market scan")
-    global_status = check_global_bleeding()
-    sector_status = get_all_sector_status()
-    market_regime = get_market_regime()
-    regime_emoji  = get_regime_emoji(market_regime)
-
-    lines = [
-        f"PRE-MARKET PULSE | {scan_time.strftime('%d %b %Y %H:%M IST')}",
-        f"",
-        f"Market Regime: {regime_emoji} {market_regime}",
-        f"Global: {get_global_summary(global_status)}",
-        f"",
-        f"Sector Status:",
-    ]
-    for sector, info in sorted(sector_status.items()):
-        pct   = info.get("change_pct", 0)
-        emoji = "DOWN" if info.get("bleeding") else ("FLAT" if pct < 0 else "UP")
-        lines.append(f"  {emoji} {sector}: {pct:+.1f}%")
-    if global_status.bleeding:
-        lines.extend(["", "GLOBAL BLEEDING — Only FNO Long Unwinding signals in full scans."])
-    lines.extend(["", "_Next scan: 10:00 AM IST_"])
-    send_message("\n".join(lines))
-    logger.info("Pre-market scan sent")
-
-
 def run_full_scan(scan_time: datetime, real_run: bool = False):
     """Full scan: all signals, 5 Telegram messages."""
     from src.parallel_runner import full_scan_pipeline
@@ -169,9 +132,11 @@ def run_full_scan(scan_time: datetime, real_run: bool = False):
 def main():
     _load_env_file()
 
+    # Read SCAN_TYPE from environment (set by GitHub Actions workflow)
+    scan_type = os.environ.get("SCAN_TYPE", "auto")
+    print(f"scan_type received: {scan_type}")
+
     parser = argparse.ArgumentParser(description="NSE Momentum Scanner")
-    parser.add_argument("--time", default="auto",
-                        help="Scan time: 8AM|10AM|11:30AM|1PM|3PM|auto")
     parser.add_argument("--dry-run", action="store_true",
                         help="Run full scan but suppress Telegram messages")
     parser.add_argument("--real-run", action="store_true",
@@ -187,8 +152,11 @@ def main():
         sys.exit(0)
 
     scan_time = datetime.now(IST)
+    run_type = "full"
+    print(f"run_type: {run_type}")
+
     logger.info(f"Scan triggered at {scan_time.strftime('%H:%M IST')} | "
-                f"time={args.time} real_run={args.real_run}")
+                f"scan_type={scan_type} run_type={run_type} real_run={args.real_run}")
 
     is_holiday, holiday_desc = _is_nse_holiday(scan_time)
     if is_holiday:
@@ -200,10 +168,7 @@ def main():
         os.environ["TELEGRAM_CHAT_ID"]   = ""
 
     try:
-        if is_8am_scan(scan_time) or args.time == "8AM":
-            run_pre_market_scan(scan_time)
-        else:
-            run_full_scan(scan_time, real_run=args.real_run)
+        run_full_scan(scan_time, real_run=args.real_run)
     except Exception as e:
         logger.exception(f"Scan failed: {e}")
         from src.telegram_bot import send_message
