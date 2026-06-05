@@ -254,8 +254,11 @@ def build_execution_plan(symbol: str, signal: dict, df_hourly: pd.DataFrame,
         t2 = round(t1 + atr * 1.5, 2)   # force T2 above T1 as final fallback
 
     # ── Validations ───────────────────────────────────────────────────────────
-    t1_min = round(entry_mid * 1.03, 2)  # relaxed from 5% → 3% for more signal coverage
-    if t1 <= t1_min:
+    # FNO T1 minimum filter removed — temporary, review after 1 week
+    # TODO: set correct threshold based on live observation
+    is_fno = signal.get("signal_type") == "fno"
+    t1_min = round(entry_mid * 1.03, 2)
+    if t1 <= t1_min and not is_fno:
         # Store computed values so caution cards can display entry/SL/T1/T2
         _rr = calculate_rr(entry_mid, best_stop, t1)
         plan.update({

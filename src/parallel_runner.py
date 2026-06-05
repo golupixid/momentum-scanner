@@ -8,10 +8,11 @@ Stage 5 Rank: top 5 per type | global dedup | sector cap
 Stage 6 News: final 15 stocks only
 Stage 7 Deliver: 5 Telegram messages
 """
+import csv
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 import pandas as pd
 import pytz
@@ -25,6 +26,39 @@ _EXCLUDE_ERRORS = [
     "too late", "Journey", "Invalid close",
     "Insufficient daily",
 ]
+
+_DAILY_SHOWN_DIR    = Path(__file__).parent.parent / "data" / "daily_shown"
+_CAUTION_SHOWN_FILE  = _DAILY_SHOWN_DIR / "caution_shown.csv"
+_WATCHLIST_SHOWN_FILE = _DAILY_SHOWN_DIR / "watchlist_shown.csv"
+
+
+def _load_shown_today(filepath: Path, symbol_col: str) -> tuple:
+    """Returns (shown_set, today_rows). Rows from previous dates are discarded."""
+    today = date.today().isoformat()
+    shown, today_rows = set(), []
+    if not filepath.exists():
+        return shown, today_rows
+    try:
+        with open(filepath, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if row.get("date") == today:
+                    shown.add(row.get(symbol_col, ""))
+                    today_rows.append(dict(row))
+    except Exception as e:
+        logger.warning(f"Could not read {filepath.name}: {e}")
+    return shown, today_rows
+
+
+def _write_shown(filepath: Path, today_rows: list, new_rows: list):
+    """Write today_rows + new_rows to filepath (replaces stale data from old dates)."""
+    all_rows = today_rows + new_rows
+    if not all_rows:
+        return
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(all_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(all_rows)
 
 
 def _plan_should_exclude(plan: dict) -> bool:
@@ -463,11 +497,14 @@ def full_scan_pipeline(scan_time: datetime = None, real_run: bool = False) -> di
     # ── CHANGE 2: Fill empty slots with caution candidates (T1 1-3%, MOM/REV only) ──
     caution_final = {"momentum": [], "reversal": []}
     caution_selected = set(selected_symbols)  # never overlap with main signals
+    caution_shown_today, caution_shown_rows = _load_shown_today(_CAUTION_SHOWN_FILE, "symbol")
     for group_name in ("momentum", "reversal"):
         empty_slots = max(0, 5 - len(final.get(group_name, [])))
         if empty_slots > 0 and caution_pool.get(group_name):
+            # Exclude caution stocks already shown today (no-repeat same day)
             pool_sorted = sorted(
-                caution_pool[group_name],
+                [c for c in caution_pool[group_name]
+                 if c["symbol"] not in caution_shown_today],
                 key=lambda x: x.get("_caution_t1_pct", 0), reverse=True,
             )
             for candidate in pool_sorted:
@@ -481,9 +518,34 @@ def full_scan_pipeline(scan_time: datetime = None, real_run: bool = False) -> di
             f"Caution cards: MOM={len(caution_final['momentum'])} "
             f"REV={len(caution_final['reversal'])} (T1 1-3%, not written to registry)"
         )
+        if real_run:
+            _today = date.today().isoformat()
+            new_caution_rows = [
+                {"symbol": s["symbol"], "signal_type": s.get("signal_type", ""), "date": _today}
+                for group in caution_final.values() for s in group
+            ]
+            _write_shown(_CAUTION_SHOWN_FILE, caution_shown_rows, new_caution_rows)
 
     # ── Proximity watchlist for footer ───────────────────────────────────────
     proximity_wl = compute_proximity_watchlist(passing_symbols, daily_data, main_signal_symbols)
+
+    # Filter watchlist by already-shown today per category (no-repeat same day)
+    _, watchlist_shown_rows = _load_shown_today(_WATCHLIST_SHOWN_FILE, "symbol")
+    mom_shown_today = {r["symbol"] for r in watchlist_shown_rows if r.get("category") == "momentum"}
+    rev_shown_today = {r["symbol"] for r in watchlist_shown_rows if r.get("category") == "reversal"}
+    filtered_mom_wl = [s for s in proximity_wl["momentum_wl"] if s["symbol"] not in mom_shown_today]
+    filtered_rev_wl = [s for s in proximity_wl["reversal_wl"] if s["symbol"] not in rev_shown_today]
+    if real_run:
+        _today = date.today().isoformat()
+        new_wl_rows = (
+            [{"symbol": s["symbol"], "category": "momentum", "date": _today}
+             for s in filtered_mom_wl[:5]] +
+            [{"symbol": s["symbol"], "category": "reversal", "date": _today}
+             for s in filtered_rev_wl[:5]]
+        )
+        if new_wl_rows:
+            _write_shown(_WATCHLIST_SHOWN_FILE, watchlist_shown_rows, new_wl_rows)
+    proximity_wl = {"momentum_wl": filtered_mom_wl[:5], "reversal_wl": filtered_rev_wl[:5]}
 
     # ── Stage 6: News for final 15 ──────────────────────────────────────────
     final_symbols = list(set(
